@@ -15,6 +15,7 @@ to the review queue with suggestions that are shown, never applied.
 import re
 from dataclasses import dataclass
 from datetime import date
+from typing import Callable
 
 from .allocation import balances
 from .charges import concession_amount
@@ -102,18 +103,6 @@ def decide(conn, amount: int, payer_upi_id: str | None, note: str | None, as_of:
 
 # --- suggestions for the review queue ------------------------------------------------
 
-WEIGHTS = {
-    "amount_equals_outstanding": 40,
-    "amount_equals_fee": 25,
-    "amount_is_months_of_fee": 15,
-    "payer_matches_guardian": 35,
-    "payer_partly_matches_guardian": 15,
-    "same_surname": 10,
-    "note_names_member": 30,
-    "upi_pays_for_family": 20,
-}
-
-
 def families_of(conn, payer_upi_ids) -> dict[str, set[int]]:
     """For each UPI ID: the members it already pays for, and their siblings.
 
@@ -143,54 +132,101 @@ def families_of(conn, payer_upi_ids) -> dict[str, set[int]]:
     return families
 
 
-def signals(member: dict, credit: dict, owed: int, fee: int, family: set[int]) -> dict[str, bool]:
-    """Which suggestion signals fire for one member. Exclusive groups pick the strongest."""
-    amount = credit["amount"]
-    fired = dict.fromkeys(WEIGHTS, False)
-    if owed > 0 and amount == owed:
-        fired["amount_equals_outstanding"] = True
-    elif fee > 0 and amount == fee:
-        fired["amount_equals_fee"] = True
-    elif fee > 0 and amount % fee == 0 and 2 <= amount // fee <= 6:
-        fired["amount_is_months_of_fee"] = True
-    payer = credit.get("payer_name")
-    against = member["guardian_name"] or member["name"]
-    score = similarity(payer, against)
-    if score >= 0.8:
-        fired["payer_matches_guardian"] = True
-    elif score >= 0.5:
-        fired["payer_partly_matches_guardian"] = True
-    payer_surname = surname(payer)
-    if payer_surname and payer_surname == surname(member["name"]):
-        fired["same_surname"] = True
-    first = first_name(member["name"])
-    if first and first in tokens(credit.get("note")):
-        fired["note_names_member"] = True
-    if member["id"] in family:
-        fired["upi_pays_for_family"] = True
-    return fired
+@dataclass(frozen=True)
+class Facts:
+    """What a signal is allowed to look at, worked out once per member.
+
+    A signal gets facts rather than a connection, so adding one cannot add a
+    query, and the whole scoring pass stays four queries however many signals
+    there are.
+    """
+    member: dict
+    credit: dict
+    owed: int                       # what this member still owes
+    fee: int                        # their monthly fee after concession
+    family: set                     # members this payer's UPI ID already pays for
+    amount: int
+    months: int                     # amount / fee when it divides exactly, else 0
+    name_score: float               # how well the payer's name matches the guardian's
+    payer_surname: str | None
+    first_name: str | None
+
+    @classmethod
+    def about(cls, member: dict, credit: dict, owed: int, fee: int, family: set) -> "Facts":
+        amount = credit["amount"]
+        payer = credit.get("payer_name")
+        return cls(member=member, credit=credit, owed=owed, fee=fee, family=family, amount=amount,
+                   months=amount // fee if fee > 0 and amount % fee == 0 else 0,
+                   name_score=similarity(payer, member["guardian_name"] or member["name"]),
+                   payer_surname=surname(payer), first_name=first_name(member["name"]))
+
+    @property
+    def who(self) -> str:
+        return self.member["guardian_name"] or self.member["name"]
 
 
-def _reasons(member: dict, credit: dict, fired: dict, owed: int, fee: int) -> list[str]:
-    reasons = []
-    if fired["amount_equals_outstanding"]:
-        reasons.append(f"amount equals the Rs {to_rupees(owed)} outstanding")
-    if fired["amount_equals_fee"]:
-        reasons.append(f"amount equals the Rs {to_rupees(fee)} monthly fee")
-    if fired["amount_is_months_of_fee"]:
-        reasons.append(f"amount is exactly {credit['amount'] // fee} months of fees")
-    who = member["guardian_name"] or member["name"]
-    if fired["payer_matches_guardian"]:
-        reasons.append(f"payer name matches {who}")
-    if fired["payer_partly_matches_guardian"]:
-        reasons.append(f"payer name partly matches {who}")
-    if fired["same_surname"]:
-        reasons.append("payer has the same surname")
-    if fired["note_names_member"]:
-        reasons.append(f"note mentions {first_name(member['name']).title()}")
-    if fired["upi_pays_for_family"]:
-        reasons.append("this UPI ID already pays for the family")
-    return reasons
+@dataclass(frozen=True)
+class Signal:
+    """One reason to think a credit belongs to a member.
+
+    Everything about a signal is in one place: its weight, when it fires, and
+    how it reads to the owner. Adding a reason to the review queue is one entry
+    in SIGNALS, and nothing else in the file changes.
+
+    group makes signals mutually exclusive: within a group only the first that
+    fires counts, so "equals the fee" cannot also score "is a whole number of
+    months of the fee" for the same rupees.
+    """
+    name: str
+    weight: int
+    fires: Callable[[Facts], bool]
+    reason: Callable[[Facts], str]
+    group: str | None = None
+
+
+SIGNALS = (
+    Signal("amount_equals_outstanding", 40, group="amount",
+           fires=lambda f: f.owed > 0 and f.amount == f.owed,
+           reason=lambda f: f"amount equals the Rs {to_rupees(f.owed)} outstanding"),
+    Signal("amount_equals_fee", 25, group="amount",
+           fires=lambda f: f.fee > 0 and f.amount == f.fee,
+           reason=lambda f: f"amount equals the Rs {to_rupees(f.fee)} monthly fee"),
+    Signal("amount_is_months_of_fee", 15, group="amount",
+           fires=lambda f: 2 <= f.months <= 6,
+           reason=lambda f: f"amount is exactly {f.months} months of fees"),
+    Signal("payer_matches_guardian", 35, group="name",
+           fires=lambda f: f.name_score >= 0.8,
+           reason=lambda f: f"payer name matches {f.who}"),
+    Signal("payer_partly_matches_guardian", 15, group="name",
+           fires=lambda f: f.name_score >= 0.5,
+           reason=lambda f: f"payer name partly matches {f.who}"),
+    Signal("same_surname", 10,
+           fires=lambda f: bool(f.payer_surname) and f.payer_surname == surname(f.member["name"]),
+           reason=lambda f: "payer has the same surname"),
+    Signal("note_names_member", 30,
+           fires=lambda f: bool(f.first_name) and f.first_name in tokens(f.credit.get("note")),
+           reason=lambda f: f"note mentions {f.first_name.title()}"),
+    Signal("upi_pays_for_family", 20,
+           fires=lambda f: f.member["id"] in f.family,
+           reason=lambda f: "this UPI ID already pays for the family"),
+)
+
+# The tunable surface: name -> weight. tools/tune_weights.py proposes changes to
+# these from recorded decisions, and evaluation.py replays any set of them.
+WEIGHTS = {signal.name: signal.weight for signal in SIGNALS}
+
+
+def fired_signals(facts: Facts) -> list[Signal]:
+    """The signals that fire for one member, at most one per exclusive group."""
+    out, groups_used = [], set()
+    for signal in SIGNALS:
+        if signal.group and signal.group in groups_used:
+            continue
+        if signal.fires(facts):
+            out.append(signal)
+            if signal.group:
+                groups_used.add(signal.group)
+    return out
 
 
 @dataclass(frozen=True)
@@ -224,17 +260,16 @@ def suggest(conn, credit: dict, as_of: date, limit: int | None = 3, weights: dic
     data = prepared or prepare(conn, as_of, [credit.get("payer_upi_id")])
     if not data.members:
         return []
-    owed, fees = data.owed, data.fees
     family = data.families.get(credit.get("payer_upi_id"), set())
     ranked = []
     for member in data.members:
-        fee = fees[member["id"]]
-        fired = signals(member, credit, owed[member["id"]], fee, family)
-        score = sum(weights[name] for name, on in fired.items() if on)
+        facts = Facts.about(member, credit, data.owed[member["id"]], data.fees[member["id"]], family)
+        fired = fired_signals(facts)
+        score = sum(weights.get(signal.name, 0) for signal in fired)
         if score > 0:
             ranked.append({"member_id": member["id"], "ref_code": member["ref_code"],
                            "name": member["name"], "score": score,
-                           "signals": [name for name, on in fired.items() if on],
-                           "reasons": _reasons(member, credit, fired, owed[member["id"]], fee)})
+                           "signals": [signal.name for signal in fired],
+                           "reasons": [signal.reason(facts) for signal in fired]})
     ranked.sort(key=lambda s: (-s["score"], s["member_id"]))      # ties stay stable
     return ranked if limit is None else ranked[:limit]

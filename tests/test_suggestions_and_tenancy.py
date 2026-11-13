@@ -8,7 +8,9 @@ from conftest import SUPERUSER_DSN, add_member, credit
 from paysleuth.charges import run_billing
 from paysleuth.db import check_role, tenant_tx
 from paysleuth.institutions import create_institution, institution_for_key
-from paysleuth.matching import REVIEW, candidate_members, decide, ref_codes_in
+from paysleuth.matching import (REVIEW, SIGNALS, WEIGHTS, Facts, Signal, candidate_members,
+                                decide, fired_signals, ref_codes_in)
+from paysleuth.names import tokens
 from paysleuth.payments import record_credit, review_queue
 
 
@@ -183,3 +185,42 @@ def test_a_shared_upi_id_suggests_the_family_and_the_matching_fee_first(conn, in
 def test_no_signal_means_no_suggestion(conn, inst):
     add_member(conn, inst, "Diya", fee="2000")
     assert _queue_one(conn, inst, amount="777", upi="walkin@ybl", name="PRIYA NAIR") == []
+
+
+# --- adding a signal is one declaration -----------------------------------------------------
+
+def test_a_signal_declares_its_weight_its_test_and_its_wording_in_one_place():
+    """The design claim: adding a reason to the review queue touches one entry.
+
+    This holds the shape, so the weight table, the firing logic and the owner's
+    wording cannot drift apart into three lists that have to be kept in step.
+    """
+    assert WEIGHTS == {signal.name: signal.weight for signal in SIGNALS}
+    assert len({signal.name for signal in SIGNALS}) == len(SIGNALS)
+    for signal in SIGNALS:
+        assert signal.weight > 0 and callable(signal.fires) and callable(signal.reason)
+
+
+def test_only_the_strongest_signal_in_a_group_counts(conn, inst):
+    """A credit equal to one month's fee must not also score "a whole number of months"."""
+    add_member(conn, inst, "Diya", fee="2000", guardian="Sunita Sharma")
+    facts = Facts.about({"id": 1, "name": "Diya Sharma", "guardian_name": "Sunita Sharma"},
+                        {"amount": 200000, "payer_name": "SUNITA SHARMA", "note": None},
+                        owed=200000, fee=200000, family=set())
+    names = [s.name for s in fired_signals(facts)]
+    # One from the amount group, one from the name group, plus the ungrouped surname.
+    assert names == ["amount_equals_outstanding", "payer_matches_guardian", "same_surname"]
+    assert "amount_equals_fee" not in names and "payer_partly_matches_guardian" not in names
+
+
+def test_a_signal_added_at_runtime_scores_and_explains_itself(conn, inst, monkeypatch):
+    """Proof that the extension point is real: declare one, and the queue uses it."""
+    diya = add_member(conn, inst, "Diya", fee="2000")
+    extra = Signal("note_says_urgent", 50, fires=lambda f: "URGENT" in tokens(f.credit.get("note")),
+                   reason=lambda f: "the note says urgent")
+    monkeypatch.setattr("paysleuth.matching.SIGNALS", (*SIGNALS, extra))
+    monkeypatch.setitem(WEIGHTS, "note_says_urgent", 50)
+    [suggestion] = _queue_one(conn, inst, amount="99", upi="walkin@ybl", note="urgent please")
+    assert suggestion["member_id"] == diya and suggestion["score"] == 50
+    assert suggestion["signals"] == ["note_says_urgent"]
+    assert suggestion["reasons"] == ["the note says urgent"]
