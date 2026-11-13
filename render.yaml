@@ -1,0 +1,49 @@
+# Render blueprint: a free PostgreSQL, the API, and the worker, from one image.
+#
+#   1. Push this repository to GitHub.
+#   2. On render.com: New -> Blueprint, and point it at the repository.
+#   3. When it is up, run the seed once from the API service's shell:
+#        python -m tools.seed_demo
+#      It prints a read-only API key to put in PAYSLEUTH_DEMO_KEY, then
+#      /docs can be clicked through with it.
+#
+# The free tier sleeps after inactivity, so the first request after a quiet
+# spell takes a few seconds to wake the service.
+databases:
+  - name: paysleuth-db
+    plan: free
+    databaseName: paysleuth
+    user: paysleuth
+
+services:
+  - type: web
+    name: paysleuth-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PAYSLEUTH_DATABASE_URL
+        fromDatabase:
+          name: paysleuth-db
+          property: connectionString
+      - key: PAYSLEUTH_WEBHOOK_SECRET
+        generateValue: true        # no gateway is wired up in the demo; set this if one is
+      - key: PAYSLEUTH_POOL_SIZE
+        value: "8"                 # the free database allows few connections; leave room for the worker
+      - key: PAYSLEUTH_LOG_LEVEL
+        value: INFO
+
+  - type: worker
+    name: paysleuth-worker
+    runtime: docker
+    plan: free
+    dockerCommand: python -m paysleuth.worker
+    envVars:
+      - key: PAYSLEUTH_DATABASE_URL
+        fromDatabase:
+          name: paysleuth-db
+          property: connectionString
+      - key: PAYSLEUTH_MESSAGE_FILE
+        value: /tmp/messages_sent.jsonl    # the demo writes messages to a file instead of sending them
+      - key: PAYSLEUTH_LOG_LEVEL
+        value: INFO

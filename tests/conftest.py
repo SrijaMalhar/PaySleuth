@@ -8,12 +8,15 @@ import os
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
 from paysleuth.allocation import balances
+from paysleuth.api import create_app
 from paysleuth.db import make_pool, migrate, tenant_tx
 from paysleuth.institutions import create_institution
 from paysleuth.members import create_member
@@ -178,3 +181,23 @@ def check_books(conn, inst) -> list[str]:
                           GROUP BY p.bank_credit_id, p.member_id HAVING COUNT(*) > 1"""):
             broken.append(f"credit {r['bank_credit_id']} has two live payments for member {r['member_id']}")
     return broken
+
+
+# Fixed moments for the API tests: "today" for anything date-driven, and a
+# daytime instant after the real clock, so the relay's quiet hours are off and
+# messages queued with the database's now() are already due.
+TODAY = date(2026, 6, 20)
+DAYTIME = datetime(2030, 1, 15, 5, 0, tzinfo=timezone.utc)       # 10:30 IST
+
+
+@pytest.fixture
+def api():
+    with fresh_pool() as pool:
+        sent = []
+        app = create_app(DSN, sent.append, today=lambda: TODAY, now=lambda: DAYTIME,
+                         pool_options=pool.options, pool_size=10)
+        with TestClient(app) as client, pool.connection() as conn:
+            inst, key = create_institution(conn, "Bright Minds Tuition")
+            other, other_key = create_institution(conn, "Other Centre")
+            client.headers["X-API-Key"] = key
+            yield SimpleNamespace(client=client, sent=sent, inst=inst, other_key=other_key)

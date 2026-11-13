@@ -14,6 +14,7 @@ from .charges import apply_late_fees, run_billing
 from .close import run_close
 from .db import make_pool, migrate
 from .institutions import all_institution_ids
+from .logging_setup import configure
 from .notify import sender_from_env
 from .outbox import relay_once
 from .periods import today_ist
@@ -68,7 +69,7 @@ def run_forever(pool, send, *, today=today_ist, clock=time.monotonic, sleep=time
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure(os.environ.get("PAYSLEUTH_LOG_LEVEL", "INFO"))
     dsn = os.environ.get("PAYSLEUTH_DATABASE_URL", "postgresql://paysleuth:paysleuth@localhost:5432/paysleuth")
     pool = make_pool(dsn, max_size=4)
     migrate(pool)

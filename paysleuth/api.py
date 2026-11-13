@@ -15,7 +15,7 @@ from datetime import date, datetime
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import audit
@@ -25,11 +25,12 @@ from .approvals import decide, list_approvals, request_reassign
 from .charges import apply_late_fees, run_billing
 from .close import list_statements, recent_closes, run_close
 from .db import make_pool, migrate
-from .evaluation import matching_report
 from .errors import Conflict, Forbidden, NotFound, PreconditionFailed, PreconditionRequired
+from .evaluation import matching_report
 from .importer import import_statement
 from .institutions import actor_for_key, add_staff, deactivate_staff, list_staff
 from .members import create_member, deactivate_member, get_member, list_members, update_member
+from .metrics import collect, render
 from .money import to_paise
 from .outbox import dead_messages, relay_once
 from .payments import assign_credit, get_credit, record_credit, reverse_credit, review_queue, split_credit
@@ -206,6 +207,12 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     def health(c=Depends(conn)):
         c.execute("SELECT 1")
         return {"status": "ok"}
+
+    @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
+    def prometheus_metrics(c=Depends(conn)):
+        """Prometheus scrape endpoint. No API key: it carries counts, no personal data,
+        and a scraper has no key. Keep it off the public internet."""
+        return render(collect(c, now()))
 
     # members
 
