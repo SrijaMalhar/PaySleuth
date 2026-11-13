@@ -1,0 +1,54 @@
+{
+  "bank": "Canara",
+  "credits": [
+    {
+      "utr": "615412345601",
+      "amount": "2000.00",
+      "received_at": "2026-06-01T10:22:31+05:30",
+      "channel": "UPI",
+      "payer_upi_id": null,
+      "payer_name": "SUNITA SHARMA",
+      "note": "June fees",
+      "narration": "UPI/CR/615412345601/SUNITA SHARMA/SBIN/**sharma@oksbi/June fees//CNRB0001234",
+      "line": 6
+    },
+    {
+      "utr": "615412345602",
+      "amount": "3500.00",
+      "received_at": "2026-06-02T11:05:10+05:30",
+      "channel": "UPI",
+      "payer_upi_id": null,
+      "payer_name": "R K VERMA",
+      "note": "PS1002 PS1003",
+      "narration": "UPI/CR/615412345602/R K VERMA/HDFC/**verma@okhdfcbank/PS1002 PS1003//CNRB0001234",
+      "line": 7
+    },
+    {
+      "utr": "N156260012345",
+      "amount": "1800.00",
+      "received_at": "2026-06-03T09:41:55+05:30",
+      "channel": "NEFT",
+      "payer_upi_id": null,
+      "payer_name": "ANIL NAIR",
+      "note": "PS1004 june fee",
+      "narration": "NEFT CR-N156260012345-ANIL NAIR-PS1004 june fee",
+      "line": 8
+    },
+    {
+      "utr": "615412345605",
+      "amount": "2500.00",
+      "received_at": "2026-06-05T08:15:44+05:30",
+      "channel": "UPI",
+      "payer_upi_id": null,
+      "payer_name": "LAKSHMI IYER",
+      "note": "meera fees",
+      "narration": "UPI/CR/615412345605/LAKSHMI IYER/UBIN/**iyer@oksbi/meera fees//CNRB0001234",
+      "line": 10
+    }
+  ],
+  "skipped_debits": 1,
+  "errors": [],
+  "continuity": "ok",
+  "opening_balance": "50000.00",
+  "closing_balance": "54800.00"
+}

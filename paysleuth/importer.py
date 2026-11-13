@@ -180,4 +180,4 @@ def import_statement(pool, inst: int, text: str, *, workers: int = 8, account: s
                                      account)
     summary = import_credits(pool, inst, parsed.credits, workers=workers, errors=parsed.errors,
                              skipped_debits=parsed.skipped_debits, reversals=parsed.reversals)
-    return {**summary, "statement": statement}
+    return {**summary, "bank": parsed.bank, "statement": statement}

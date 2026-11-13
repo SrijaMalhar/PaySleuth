@@ -1,0 +1,54 @@
+{
+  "bank": "HDFC",
+  "credits": [
+    {
+      "utr": "615412345601",
+      "amount": "2000.00",
+      "received_at": "2026-06-01T00:00:00+05:30",
+      "channel": "UPI",
+      "payer_upi_id": "sunita.sharma@oksbi",
+      "payer_name": "SUNITA SHARMA",
+      "note": "JUNE FEES",
+      "narration": "UPI-SUNITA SHARMA-SUNITA.SHARMA@OKSBI-SBIN0001234-615412345601-JUNE FEES",
+      "line": 6
+    },
+    {
+      "utr": "615412345602",
+      "amount": "3500.00",
+      "received_at": "2026-06-02T00:00:00+05:30",
+      "channel": "UPI",
+      "payer_upi_id": "rk-verma@okhdfcbank",
+      "payer_name": "R K VERMA",
+      "note": "FEES PS1002 PS1003",
+      "narration": "UPI-R K VERMA-RK-VERMA@OKHDFCBANK-HDFC0001234-615412345602-FEES PS1002 PS1003",
+      "line": 7
+    },
+    {
+      "utr": "N156260012345",
+      "amount": "1800.00",
+      "received_at": "2026-06-03T00:00:00+05:30",
+      "channel": "NEFT",
+      "payer_upi_id": null,
+      "payer_name": "ANIL NAIR",
+      "note": null,
+      "narration": "NEFT CR-SBIN0001234-ANIL NAIR-BRIGHT MINDS TUITION-N156260012345",
+      "line": 8
+    },
+    {
+      "utr": "615412345699",
+      "amount": "2500.00",
+      "received_at": "2026-06-04T00:00:00+05:30",
+      "channel": "IMPS",
+      "payer_upi_id": null,
+      "payer_name": "PRIYA NAIR",
+      "note": "PS1005",
+      "narration": "IMPS-615412345699-PRIYA NAIR-HDFC-XXXXXXXX1234-PS1005",
+      "line": 9
+    }
+  ],
+  "skipped_debits": 1,
+  "errors": [],
+  "continuity": "ok",
+  "opening_balance": "50000.00",
+  "closing_balance": "54800.00"
+}

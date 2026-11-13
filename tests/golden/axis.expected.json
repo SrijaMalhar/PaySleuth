@@ -1,0 +1,54 @@
+{
+  "bank": "Axis",
+  "credits": [
+    {
+      "utr": "615412345601",
+      "amount": "2000.00",
+      "received_at": "2026-06-01T00:00:00+05:30",
+      "channel": "UPI",
+      "payer_upi_id": null,
+      "payer_name": "SUNITA SHARMA",
+      "note": "June fees",
+      "narration": "UPI/P2A/615412345601/SUNITA SHARMA/State Bank Of India/June fees",
+      "line": 5
+    },
+    {
+      "utr": "615412345602",
+      "amount": "3500.00",
+      "received_at": "2026-06-02T00:00:00+05:30",
+      "channel": "UPI",
+      "payer_upi_id": null,
+      "payer_name": "R K VERMA",
+      "note": "PS1002 PS1003",
+      "narration": "UPI/P2A/615412345602/R K VERMA/HDFC BANK LTD/PS1002 PS1003",
+      "line": 6
+    },
+    {
+      "utr": "N156260012345",
+      "amount": "1800.00",
+      "received_at": "2026-06-03T00:00:00+05:30",
+      "channel": "NEFT",
+      "payer_upi_id": null,
+      "payer_name": "ANIL NAIR",
+      "note": "PS1004 june fee",
+      "narration": "NEFT/N156260012345/ANIL NAIR/STATE BANK OF INDIA/PS1004 june fee",
+      "line": 7
+    },
+    {
+      "utr": "615412345605",
+      "amount": "2500.00",
+      "received_at": "2026-06-05T00:00:00+05:30",
+      "channel": "UPI",
+      "payer_upi_id": null,
+      "payer_name": "LAKSHMI IYER",
+      "note": "meera fees",
+      "narration": "UPI/P2A/615412345605/LAKSHMI IYER/Union Bank Of India/meera fees",
+      "line": 9
+    }
+  ],
+  "skipped_debits": 1,
+  "errors": [],
+  "continuity": "ok",
+  "opening_balance": "50000.00",
+  "closing_balance": "54800.00"
+}

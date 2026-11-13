@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from . import banks
 from .money import to_paise
 from .periods import IST
 
@@ -53,6 +54,7 @@ class ParseResult:
     credits: list[Credit] = field(default_factory=list)   # not "= []": one list per instance
     reversals: list[Reversal] = field(default_factory=list)
     rows: list[StatementRow] = field(default_factory=list)
+    bank: str | None = None           # which bank adapter recognised the layout, if any
     skipped_debits: int = 0
     errors: list[dict] = field(default_factory=list)
 
@@ -137,6 +139,11 @@ def _find_columns(header: list[str]) -> dict[str, int]:
     return found
 
 
+HEADER_SEARCH_LINES = 40
+
+# Something that is trying to be a date ("31/02/2026" included, so a bad date is still reported).
+_DATE_LIKE = re.compile(r"\d{1,4}[/\-. ][0-9A-Za-z]{1,9}[/\-. ]\d{2,4}")
+
 _DATE_FORMATS = [
     "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y", "%d/%m/%y",
     "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y", "%d-%m-%y",
@@ -209,20 +216,29 @@ def _ledger_row(row: list[str], columns: dict, line: int) -> StatementRow | None
 def parse_statement(text: str) -> ParseResult:
     """Parse a bank CSV. Debits are counted and skipped; a bad row is reported, the rest still import."""
     rows = list(csv.reader(io.StringIO(text)))
-    while rows and not any(cell.strip() for cell in rows[0]):
-        rows.pop(0)
-    if not rows:
+    if not any(cell.strip() for row in rows for cell in row):
         raise ValueError("the statement is empty")
-    columns = _find_columns(rows[0])
-    missing = [c for c in ("date", "narration", "credit") if c not in columns]
-    if missing:
+    # Banks put the account holder's details above the table, so find the header row first.
+    header_at, columns = None, {}
+    for index, row in enumerate(rows[:HEADER_SEARCH_LINES]):
+        columns = _find_columns(row)
+        if all(c in columns for c in ("date", "narration", "credit")):
+            header_at = index
+            break
+    if header_at is None:
+        first = next(row for row in rows if any(cell.strip() for cell in row))
+        missing = [c for c in ("date", "narration", "credit") if c not in _find_columns(first)]
         raise ValueError(f"the statement has no {', '.join(missing)} column")
+    bank = banks.detect(_key(h) for h in rows[header_at])
 
-    result = ParseResult()
-    # Line 1 is the header, so numbering from 2 matches the row number the owner sees in Excel.
-    for line, row in enumerate(rows[1:], start=2):
+    result = ParseResult(bank=bank.name if bank else None)
+    # Numbered as in the file, so an error names the row the owner sees in Excel.
+    for line, row in enumerate(rows[header_at + 1:], start=header_at + 2):
         if not any(cell.strip() for cell in row):
             continue
+        date_text = _cell(row, columns["date"])
+        if date_text and not _DATE_LIKE.search(date_text):
+            continue                  # a summary or legend line under the table, not a transaction
         ledger = _ledger_row(row, columns, line)
         if ledger is not None:
             result.rows.append(ledger)
@@ -245,7 +261,7 @@ def parse_statement(text: str) -> ParseResult:
             amount = to_paise(credit_text)
             received_at = _parse_date(_cell(row, columns["date"]))
             narration = " ".join(_cell(row, columns["narration"]).split())
-            parsed = parse_narration(narration)
+            parsed = (bank.narration(narration) if bank else None) or parse_narration(narration)
             if parsed is None:
                 reference = re.sub(r"\s+", "", _cell(row, columns.get("reference")))
                 if not reference:
