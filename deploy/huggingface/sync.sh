@@ -56,4 +56,6 @@ fi
 # rather than a branch of its own.
 git push -q --force "https://huggingface.co/spaces/$space" main
 echo "pushed $revision to https://huggingface.co/spaces/$space"
-echo "it builds for 3-5 minutes, then answers at https://${space/\//-}.hf.space/health"
+# A Space's hostname is its owner and name joined by a hyphen, lowercased.
+host=$(printf '%s' "${space/\//-}" | tr '[:upper:]' '[:lower:]')
+echo "it builds for 3-5 minutes, then answers at https://$host.hf.space/health"
