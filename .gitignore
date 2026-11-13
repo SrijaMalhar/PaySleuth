@@ -6,3 +6,9 @@ __pycache__/
 messages_sent.jsonl
 bench/results/*.tmp
 .env
+
+# Never commit a real institution's data. Work on it outside the repository, or
+# under a path matching one of these if you must keep it alongside the code.
+*_real.csv
+real_*.csv
+pilot_data/

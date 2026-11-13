@@ -402,7 +402,7 @@ Refused, with reasons I would defend:
 
 ## How correctness is established
 
-Five layers, each catching what the one above cannot. 323 tests, none mocked — every one runs against a
+Five layers, each catching what the one above cannot. 336 tests, none mocked — every one runs against a
 real PostgreSQL in its own schema, because locks, constraints and row-level security are the subject.
 
 **1. Unit and integration tests** — the cases I thought of. 19 files; `test_reports.py` is worth
@@ -618,6 +618,29 @@ The five automatic rules, in order. Only these decide without a human:
    split. Never a Rs 0 share, so a sibling on a full scholarship sends it to review instead.
 5. Anything else → the review queue, with ranked suggestions that are shown and never applied.
 
+### Running a pilot on one real institution's statement
+
+The matching weights are guesses until someone's own statement scores them, so the measuring path is a
+tool rather than a plan:
+
+```bash
+python -m tools.pilot setup  --name "Sunrise PG" --members members.csv   # sample_data/ has the template
+python -m tools.pilot import --institution 1 --statement june.csv --as-of 2026-06-30
+python -m tools.pilot review --institution 1                             # one credit at a time
+python -m tools.pilot measure --institution 1
+```
+
+`review` records, for every decision, which suggestions were on screen and where in that ranking the
+answer came — so `measure` can report what share of credits matched with nobody involved, how often the
+top suggestion was right, and each signal's precision. It refuses to tune the weights below 50 decisions
+and prints how many more are needed, because a rate over six credits is not a rate.
+
+Two rules about the data, and they are in the tool's own help. It runs against a local database that gets
+dropped afterwards, and the statement is never committed (`.gitignore` covers `*_real.csv`, `real_*.csv`
+and `pilot_data/`). And the statement is *not* anonymised first: payer names and UPI IDs are exactly what
+matching is scored on, so anonymising before measuring would measure the anonymiser. `tools/anonymise_statement.py`
+exists for the opposite job — turning a real export into a golden test fixture that can be committed.
+
 ### Deploying
 
 ```bash
@@ -648,7 +671,8 @@ Stated plainly, because an unstated limit is a claim.
   suggestion accuracy from an institution's own recorded decisions, and `tools/tune_weights.py` tunes the
   weights against them with 5-fold cross-validation, refusing to propose anything from fewer than 50
   decisions. No real institution has used this, so there is no real-world rate to quote and none is
-  invented here. The current weights are informed guesses.
+  invented here. The current weights are informed guesses. `tools/pilot.py` is the path from here to a
+  measured number; until someone walks it, this bullet stands.
 - **The bank adapters are written against published export layouts**, and the golden statements in
   `tests/golden/` are synthetic. Each should be re-checked against a real anonymised export before it is
   trusted; `tools/anonymise_statement.py` prepares one.

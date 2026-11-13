@@ -1,0 +1,6 @@
+name,guardian_name,monthly_fee,phone,upi_ids,billing_day,start_period,concession_pct
+Diya Sharma,Sunita Sharma,2000,9876543210,sunita.sharma@oksbi,5,2026-05,0
+Rohan Verma,Rajesh Kumar Verma,2000,9876500001,rk.verma@okhdfcbank,5,2026-05,0
+Kabir Verma,Rajesh Kumar Verma,1500,9876500001,rk.verma@okhdfcbank,5,2026-05,0
+Arjun Nair,Anil Nair,1800,,,5,2026-05,0
+Meera Iyer,Lakshmi Iyer,2500,9876500004,,5,2026-05,25
