@@ -1,8 +1,27 @@
-"""The transactional outbox: messages queued with the change they report."""
+"""The transactional outbox: a small queue on PostgreSQL with the guarantees of a cloud queue.
+
+    Never a payment without its receipt   The receipt row is inserted in the payment's transaction.
+    No two workers send one row at once   The claim uses FOR UPDATE SKIP LOCKED.
+    A crashed worker's messages still go  A claim older than VISIBILITY_TIMEOUT goes back to pending,
+                                          so delivery is at-least-once and every payload carries
+                                          message_id for the gateway to drop repeats.
+    A member's receipts arrive in order   Only a member's oldest pending message of a kind is claimable.
+    No transaction open while sending     Claim and commit, send outside any transaction, then record
+                                          the result in a new short transaction.
+"""
 
 import uuid
+from datetime import datetime, timedelta
 
 from psycopg.types.json import Jsonb
+
+from .db import tenant_tx
+from .institutions import settings
+from .money import to_rupees
+from .periods import IST, utc_now
+
+MAX_ATTEMPTS = 8
+VISIBILITY_TIMEOUT = timedelta(seconds=60)
 
 
 def enqueue(conn, inst: int, *, kind: str, member_id: int, payload: dict, charge_id: int | None = None,
@@ -22,3 +41,123 @@ def enqueue(conn, inst: int, *, kind: str, member_id: int, payload: dict, charge
         (inst, message_id, kind, member_id, charge_id, dedupe_key,
          Jsonb({"message_id": message_id, "kind": kind, **payload}), quiet_hours)).fetchone()
     return message_id if row else None
+
+
+def backoff(attempts: int) -> timedelta:
+    """5, 10, 20, 40 ... seconds, capped at an hour."""
+    return timedelta(seconds=min(5 * 2 ** (attempts - 1), 3600))
+
+
+def in_quiet_hours(hour: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end          # a window that wraps midnight, such as 21 to 8
+
+
+def next_allowed(moment: datetime, end: int) -> datetime:
+    """The next time the quiet window ends: today at end o'clock IST, or tomorrow if that has passed."""
+    local = moment.astimezone(IST)
+    allowed = local.replace(hour=end, minute=0, second=0, microsecond=0)
+    if allowed <= local:
+        allowed += timedelta(days=1)
+    return allowed
+
+
+def _claim(conn, inst: int, t: datetime, batch: int) -> list[dict]:
+    with tenant_tx(conn, inst):
+        conn.execute("UPDATE outbox SET status = 'pending', claimed_at = NULL "
+                     "WHERE status = 'sending' AND claimed_at < %s", (t - VISIBILITY_TIMEOUT,))
+        return conn.execute(
+            """WITH ready AS (
+                   SELECT o.id FROM outbox o
+                    WHERE o.status = 'pending' AND o.next_attempt_at <= %(now)s
+                      AND NOT EXISTS (SELECT 1 FROM outbox e
+                                       WHERE e.member_id = o.member_id AND e.kind = o.kind
+                                         AND e.status IN ('pending', 'sending') AND e.id < o.id)
+                    ORDER BY o.id
+                    LIMIT %(batch)s
+                      FOR UPDATE SKIP LOCKED)
+               UPDATE outbox o SET status = 'sending', claimed_at = %(now)s
+                 FROM ready WHERE o.id = ready.id
+            RETURNING o.*""", {"now": t, "batch": batch}).fetchall()
+
+
+def _prepare(conn, inst: int, msg: dict, t: datetime, cfg: dict):
+    """Decide what to do with a claimed message: ("send", payload), ("skip", reason) or ("later", when)."""
+    payload = dict(msg["payload"])
+    if msg["kind"] == "overdue_reminder":
+        with tenant_tx(conn, inst):
+            later = conn.execute("SELECT 1 FROM outbox WHERE charge_id = %s AND kind = 'overdue_reminder' "
+                                 "AND id > %s LIMIT 1", (msg["charge_id"], msg["id"])).fetchone()
+            if later:
+                return "skip", "a later reminder for this fee exists"
+            unpaid = conn.execute(
+                """SELECT c.amount - COALESCE(SUM(a.amount), 0) AS unpaid
+                     FROM charges c LEFT JOIN allocations a ON a.charge_id = c.id
+                    WHERE c.id = %s GROUP BY c.id""", (msg["charge_id"],)).fetchone()["unpaid"]
+        if unpaid <= 0:
+            return "skip", "the fee has been paid"
+        payload["amount_due"] = to_rupees(unpaid)
+    if msg["quiet_hours"] and in_quiet_hours(t.astimezone(IST).hour, cfg["quiet_start"], cfg["quiet_end"]):
+        return "later", next_allowed(t, cfg["quiet_end"])
+    return "send", payload
+
+
+def _guarded(conn, inst: int, msg: dict, sql: str, params: tuple) -> bool:
+    """Update a message only if this worker still owns its claim.
+
+    A slow worker whose claim already expired and was taken by another worker
+    must not overwrite the new owner's state.
+    """
+    with tenant_tx(conn, inst):
+        row = conn.execute(sql + " WHERE id = %s AND status = 'sending' AND claimed_at = %s RETURNING id",
+                           (*params, msg["id"], msg["claimed_at"])).fetchone()
+    return row is not None
+
+
+def _finish(conn, inst: int, msg: dict, status: str, t: datetime, note: str | None = None) -> bool:
+    return _guarded(conn, inst, msg, "UPDATE outbox SET status = %s, sent_at = %s, claimed_at = NULL, "
+                    "last_error = %s", (status, t if status == "sent" else None, note))
+
+
+def relay_once(conn, inst: int, send, *, now=utc_now, batch: int = 50) -> dict:
+    """Claim a batch, then deliver each message outside any transaction."""
+    t = now()
+    claimed = _claim(conn, inst, t, batch)          # the claim is committed here
+    summary = {"claimed": len(claimed), "sent": 0, "skipped": 0, "deferred": 0, "failed": 0, "dead": 0}
+    if not claimed:
+        return summary
+    cfg = settings(conn, inst)
+    for msg in sorted(claimed, key=lambda m: m["id"]):
+        action, value = _prepare(conn, inst, msg, t, cfg)
+        if action == "skip":
+            summary["skipped"] += _finish(conn, inst, msg, "skipped", t, value)
+            continue
+        if action == "later":
+            summary["deferred"] += _guarded(conn, inst, msg, "UPDATE outbox SET status = 'pending', "
+                                            "claimed_at = NULL, next_attempt_at = %s", (value,))
+            continue
+        try:
+            send(value)
+        except Exception as error:                      # any failure is retried
+            attempts = msg["attempts"] + 1
+            dead = attempts >= MAX_ATTEMPTS
+            _guarded(conn, inst, msg,
+                     "UPDATE outbox SET status = %s, attempts = %s, next_attempt_at = %s, "
+                     "claimed_at = NULL, last_error = %s",
+                     ("dead" if dead else "pending", attempts, t + backoff(attempts),
+                      f"{type(error).__name__}: {error}"[:500]))
+            summary["dead" if dead else "failed"] += 1
+            continue
+        summary["sent"] += _finish(conn, inst, msg, "sent", t)
+    return summary
+
+
+def dead_messages(conn, inst: int) -> list[dict]:
+    with tenant_tx(conn, inst):
+        rows = conn.execute("SELECT id, message_id, kind, member_id, attempts, last_error, created_at "
+                            "FROM outbox WHERE status = 'dead' ORDER BY id").fetchall()
+    return [{**r, "message_id": str(r["message_id"]), "created_at": r["created_at"].isoformat()}
+            for r in rows]
