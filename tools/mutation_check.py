@@ -85,6 +85,12 @@ MUTATIONS = [
              (("\"SELECT * FROM approval_requests WHERE id = %s FOR UPDATE\"",
                "\"SELECT * FROM approval_requests WHERE id = %s\""),),
              "tests/test_staff.py::test_two_approvers_at_once_apply_it_once"),
+    Mutation("webhook timestamp not covered by the signature", "paysleuth/webhooks.py",
+             (("    return str(int(timestamp)).encode() + b\".\" + body", "    return body"),),
+             "tests/test_webhooks.py::test_a_captured_signature_cannot_be_reused_with_a_fresh_timestamp"),
+    Mutation("webhook timestamp window removed", "paysleuth/webhooks.py",
+             (("    if abs(moment - timestamp) > tolerance:", "    if False:"),),
+             "tests/test_webhooks.py::test_an_old_message_sent_again_is_refused"),
 ]
 
 
