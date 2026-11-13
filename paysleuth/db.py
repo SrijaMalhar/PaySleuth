@@ -34,16 +34,39 @@ def _configure(conn) -> None:
     conn.adapters.register_loader("numeric", PaiseLoader)
 
 
+def pooler_in_front(dsn: str) -> bool:
+    """Whether the DSN points at a transaction-mode connection pooler.
+
+    A pooler in transaction mode hands a different backend to the next
+    transaction, so a statement this process prepared is not there the second
+    time it is used -- the error is "prepared statement _pg3_0 already exists",
+    and it appears only under load, once psycopg has promoted a query. The
+    hosted Postgres services spell their pooled endpoint differently, so this
+    recognises the two common shapes rather than guessing from the port.
+    """
+    return "-pooler." in dsn or "pgbouncer=true" in dsn
+
+
 def make_pool(dsn: str, *, min_size: int = 1, max_size: int = 10,
-              options: str | None = None) -> ConnectionPool:
+              options: str | None = None, prepare: bool | None = None) -> ConnectionPool:
     """A pool of autocommit connections that return rows as dicts.
 
     Autocommit because every transaction in PaySleuth is opened explicitly;
     no connection can sit idle inside a forgotten transaction holding locks.
+
+    `prepare` controls server-side prepared statements: None (the default)
+    leaves them on unless the DSN names a pooled endpoint. Nothing else about
+    the design minds a pooler -- row-level security is set with `SET LOCAL`,
+    and the advisory lock around migrations is transaction-scoped, so both stay
+    on one backend for as long as they have to.
     """
+    if prepare is None:
+        prepare = not pooler_in_front(dsn)
     kwargs = {"row_factory": dict_row, "autocommit": True}
     if options:
         kwargs["options"] = options
+    if not prepare:
+        kwargs["prepare_threshold"] = None
     return ConnectionPool(dsn, min_size=min_size, max_size=max_size, kwargs=kwargs,
                           configure=_configure, open=True)
 

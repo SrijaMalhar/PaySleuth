@@ -1,19 +1,30 @@
-# Render blueprint: a free PostgreSQL, the API, and the worker, from one image.
+# Render blueprint: the API on Render's free web service, PostgreSQL on Neon.
 #
-#   1. Push this repository to GitHub.
-#   2. On render.com: New -> Blueprint, and point it at the repository.
-#   3. When it is up, run the seed once from the API service's shell:
-#        python -m tools.seed_demo
-#      It prints a read-only API key to put in PAYSLEUTH_DEMO_KEY, then
-#      /docs can be clicked through with it.
+# Why the database is not Render's. A free Render Postgres expires 30 days
+# after it is created -- the clock starts at creation, not at first use -- and
+# the data is deleted 14 days later. For something meant to stay up and be
+# shown to people, that is a deploy with a fuse in it. Neon's free tier has no
+# expiry, so the database outlives the demo.
 #
-# The free tier sleeps after inactivity, so the first request after a quiet
-# spell takes a few seconds to wake the service.
-databases:
-  - name: paysleuth-db
-    plan: free
-    databaseName: paysleuth
-    user: paysleuth
+#   1. Create a Neon project (neon.tech) and copy its connection string.
+#   2. On render.com: New -> Blueprint, point it at this repository.
+#      Render will prompt for PAYSLEUTH_DATABASE_URL: paste the Neon string.
+#   3. Seed the demo from your own machine, against the same Neon database:
+#        PAYSLEUTH_DATABASE_URL="<neon string>" python -m tools.seed_demo
+#      It prints an owner API key. Render's free plan has no shell, which is
+#      why this is run locally rather than on the service.
+#   4. Put that key and the service URL in the repository secrets
+#      PAYSLEUTH_API_KEY and PAYSLEUTH_URL, so .github/workflows/
+#      scheduled-jobs.yml can run the jobs a worker would.
+#
+# The schema is applied on boot, under an advisory lock, so there is no
+# migration step and two instances starting together cannot collide.
+#
+# Two free-tier behaviours worth knowing before you send the link to anyone:
+# a free web service sleeps after 15 minutes without traffic and takes about a
+# minute to wake, and a workspace gets 750 instance hours a month.
+# .github/workflows/keep-warm.yml trades some of those hours for a link that
+# answers immediately.
 
 services:
   - type: web
@@ -23,33 +34,32 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PAYSLEUTH_DATABASE_URL
-        fromDatabase:
-          name: paysleuth-db
-          property: connectionString
+        sync: false                # set at deploy time: the Neon connection string
       - key: PAYSLEUTH_WEBHOOK_SECRET
         generateValue: true        # no gateway is wired up in the demo; set this if one is
       - key: PAYSLEUTH_METRICS_TOKEN
         generateValue: true        # /metrics needs this, or a staff key for one institution
       - key: PAYSLEUTH_POOL_SIZE
-        value: "8"                 # the free database allows few connections; leave room for the worker
+        value: "5"                 # a free instance has little memory, and Neon counts connections
+      - key: PAYSLEUTH_MESSAGE_FILE
+        value: /tmp/messages_sent.jsonl   # the demo records messages instead of sending them
       - key: PAYSLEUTH_LOG_LEVEL
         value: INFO
 
-  # Render's free tier has no background workers, so this one needs a paid plan.
-  # To stay free, delete this service and use .github/workflows/scheduled-jobs.yml
-  # instead: every job the worker runs is also an endpoint, and all of them are
-  # idempotent, so an hourly poke is equivalent to the worker polling.
-  - type: worker
-    name: paysleuth-worker
-    runtime: docker
-    plan: starter
-    dockerCommand: python -m paysleuth.worker
-    envVars:
-      - key: PAYSLEUTH_DATABASE_URL
-        fromDatabase:
-          name: paysleuth-db
-          property: connectionString
-      - key: PAYSLEUTH_MESSAGE_FILE
-        value: /tmp/messages_sent.jsonl    # the demo writes messages to a file instead of sending them
-      - key: PAYSLEUTH_LOG_LEVEL
-        value: INFO
+# No worker service. Render's free tier has no background workers, and a paid
+# one is not needed here: every job paysleuth.worker runs is also an endpoint,
+# and every one is idempotent, so the scheduled workflow poking them hourly is
+# the same work at a coarser interval. On a host with free workers, or on a
+# paid plan, add:
+#
+#   - type: worker
+#     name: paysleuth-worker
+#     runtime: docker
+#     plan: starter
+#     dockerCommand: python -m paysleuth.worker
+#     envVars:
+#       - key: PAYSLEUTH_DATABASE_URL
+#         sync: false
+#
+# Both are safe to run together -- the relay claims with FOR UPDATE SKIP
+# LOCKED -- but it is needless traffic, so pick one.

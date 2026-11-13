@@ -30,7 +30,7 @@ refuse rather than guess.
 
 | | |
 |---|---|
-| **336 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **343 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
 | **22/22 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
 | **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
 | **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence is tested at 1, 4, 8 and 16 workers |
@@ -423,7 +423,7 @@ Refused, with reasons I would defend:
 
 ## How correctness is established
 
-Five layers, each catching what the one above cannot. 336 tests, none mocked — every one runs against a
+Five layers, each catching what the one above cannot. 343 tests, none mocked — every one runs against a
 real PostgreSQL in its own schema, because locks, constraints and row-level security are the subject.
 
 **1. Unit and integration tests** — the cases I thought of. 19 files; `test_reports.py` is worth
@@ -670,9 +670,33 @@ docker run -e PAYSLEUTH_DATABASE_URL=... -p 8000:8000 paysleuth                 
 docker run -e PAYSLEUTH_DATABASE_URL=... paysleuth python -m paysleuth.worker    # worker
 ```
 
-One image serves both roles, so the API and the worker cannot drift apart. `render.yaml` brings up a free
-PostgreSQL, the API and the worker. Settings: `PAYSLEUTH_DATABASE_URL`, `PAYSLEUTH_MESSAGE_WEBHOOK`,
-`PAYSLEUTH_WEBHOOK_SECRET`, `PAYSLEUTH_METRICS_TOKEN`, `PAYSLEUTH_POOL_SIZE`, `PAYSLEUTH_LOG_LEVEL`.
+One image serves both roles, so the API and the worker cannot drift apart. Settings:
+`PAYSLEUTH_DATABASE_URL`, `PAYSLEUTH_MESSAGE_WEBHOOK`, `PAYSLEUTH_WEBHOOK_SECRET`,
+`PAYSLEUTH_METRICS_TOKEN`, `PAYSLEUTH_POOL_SIZE`, `PAYSLEUTH_LOG_LEVEL`. The schema is applied on boot
+under an advisory lock, so there is no migration step and two instances starting together cannot collide.
+
+`render.yaml` is a blueprint for the free tier, and three of its decisions are about what free tiers
+actually do rather than what they advertise:
+
+- **The database is Neon, not Render's.** A free Render Postgres expires 30 days after creation — the
+  clock starts at creation, not first use — and the data is deleted 14 days later. A demo with a fuse in
+  it is worse than no demo, so the blueprint takes a connection string instead of provisioning a database.
+- **No worker service**, because Render's free tier has none. Every job the worker runs is also an
+  idempotent endpoint, so `.github/workflows/scheduled-jobs.yml` pokes them hourly in the right order
+  (bill, remind, relay until it claims nothing, close last). Coarser than a 5-second poll, same work.
+- **`.github/workflows/keep-warm.yml`** pings `/health` every 14 minutes between 06:00 and 00:00 IST,
+  because a free service sleeps after 15 idle minutes and takes about a minute to wake. 18 hours a day is
+  roughly 540 of the 750 free instance hours a month; round the clock would be about 720 and leave no
+  margin, which is why the window is a window.
+
+One change the hosted database forced on the code. The free services put a transaction-mode pooler in
+front of PostgreSQL, which hands the next transaction a different backend — so a statement psycopg
+prepared is not there the second time it runs, and the error (`prepared statement _pg3_0 already
+exists`) appears only under load, after a query has been executed enough times to be promoted.
+`make_pool` recognises a pooled DSN and turns preparation off for it. Nothing else about the design
+minds a pooler: row-level security is set with `SET LOCAL` and the migration lock is transaction-scoped,
+so both stay on one backend for exactly as long as they need to. `tests/test_deployment.py` holds the
+detection and what it does to the connection.
 
 Outgoing messages are signed `X-PaySleuth-Signature: t=<unix>,v1=<hex HMAC-SHA256>` over
 `"<t>.<body bytes>"` — signing the timestamp *with* the body is what stops a captured message being

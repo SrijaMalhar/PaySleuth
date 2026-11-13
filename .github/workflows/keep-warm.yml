@@ -1,0 +1,47 @@
+name: Keep warm
+# A free Render web service sleeps after 15 minutes without inbound traffic and
+# takes about a minute to wake. That minute is the whole first impression for
+# anyone opening the link, so this trades free instance hours for a URL that
+# answers immediately.
+#
+# The arithmetic, because the budget is real: a workspace gets 750 free
+# instance hours a calendar month. Awake 06:00-00:00 IST is 18 hours a day,
+# about 540 hours a month, which leaves room. Pinging around the clock would be
+# roughly 720 and leaves almost none, so the window is deliberate rather than
+# lazy -- nobody is clicking the link at 04:00 IST.
+#
+# Needs one repository secret: PAYSLEUTH_URL (https://your-service.onrender.com).
+# Without it the job exits quietly, so a fork does not fail.
+#
+# Delete this workflow on a paid plan, where nothing sleeps.
+on:
+  schedule:
+    # Every 14 minutes (under Render's 15-minute idle timeout), 00:30-18:29 UTC
+    # = 06:00-23:59 IST.
+    - cron: "2,16,30,44,58 0-18 * * *"
+  workflow_dispatch:
+
+# A slow wake-up should not pile up behind the previous attempt.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake the service
+        env:
+          URL: ${{ secrets.PAYSLEUTH_URL }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "PAYSLEUTH_URL is not set; nothing to do."
+            exit 0
+          fi
+          # /health needs no key and touches the database, so a pass means the
+          # service is awake *and* its connection to Neon is alive -- which is
+          # the thing a cold start actually delays.
+          start=$(date +%s)
+          body=$(curl -fsS --retry 3 --retry-all-errors --max-time 120 "$URL/health")
+          echo "woke in $(( $(date +%s) - start ))s: $body"
