@@ -43,6 +43,34 @@ def test_prepared_statements_are_off_behind_a_pooler_and_on_without_one():
         assert conn.prepare_threshold is None
 
 
+def test_every_protected_table_forces_row_level_security(conn):
+    """FORCE is what makes the policies apply to the role that owns the tables.
+
+    In production the application creates its own tables, so it *is* the owner,
+    and a plain ENABLE lets an owner through every policy without error. The
+    tenancy tests are meaningful only because of this flag, so it is asserted
+    directly rather than inferred from them.
+    """
+    unforced = conn.execute(
+        """SELECT relname FROM pg_class
+            WHERE relnamespace = current_schema()::regnamespace
+              AND relrowsecurity AND NOT relforcerowsecurity
+            ORDER BY relname""").fetchall()
+    assert [r["relname"] for r in unforced] == []
+
+    protected = conn.execute(
+        "SELECT COUNT(*) AS n FROM pg_class WHERE relnamespace = current_schema()::regnamespace "
+        "AND relrowsecurity").fetchone()
+    assert protected["n"] == 15
+
+
+def test_the_connecting_role_does_not_bypass_row_level_security(conn):
+    """The check that stopped a deploy onto a managed provider's owner role."""
+    role = conn.execute(
+        "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
+    assert not role["rolsuper"] and not role["rolbypassrls"]
+
+
 def test_a_repeated_query_still_answers_with_preparation_disabled():
     """Past psycopg's promotion threshold, which is where the pooler error lands."""
     with make_pool(DSN, max_size=1, prepare=False) as pool, pool.connection() as conn:

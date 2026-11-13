@@ -689,6 +689,17 @@ actually do rather than what they advertise:
   roughly 540 of the 750 free instance hours a month; round the clock would be about 720 and leave no
   margin, which is why the window is a window.
 
+**The role the provider gives you is not the role to run as.** A managed PostgreSQL hands you an owner
+that belongs to the provider's own administrative role — `neon_superuser`, `supabase_admin` — and those
+carry `BYPASSRLS`. Connect as one and every policy in `schema.sql` is skipped with no error and no
+warning: one tenant can read another's rows. `check_role()` refuses to start as such a role, so the
+deploy fails at the first migration instead of quietly later. `docker/initdb-hosted.sql` creates the
+ordinary role to use instead — with SQL, because a role added through the provider's dashboard inherits
+that same administrative role and fails the check for the same reason. The application then creates its
+own tables and owns them, which is safe only because the schema declares `FORCE ROW LEVEL SECURITY`: a
+table's owner bypasses a merely-enabled policy whatever its role attributes say. `tests/test_deployment.py`
+asserts all 15 protected tables carry `FORCE`, since every tenancy test in the suite depends on it.
+
 One change the hosted database forced on the code. The free services put a transaction-mode pooler in
 front of PostgreSQL, which hands the next transaction a different backend — so a statement psycopg
 prepared is not there the second time it runs, and the error (`prepared statement _pg3_0 already
