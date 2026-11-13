@@ -14,22 +14,24 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import audit
+from .actors import Actor, current_actor
 from .alerts import list_alerts, resolve_alert
+from .approvals import decide, list_approvals, request_reassign
 from .charges import apply_late_fees, run_billing
 from .close import list_statements, recent_closes, run_close
 from .db import make_pool, migrate
-from .errors import Conflict, NotFound, PreconditionFailed, PreconditionRequired
+from .errors import Conflict, Forbidden, NotFound, PreconditionFailed, PreconditionRequired
 from .importer import import_statement
-from .institutions import institution_for_key
+from .institutions import actor_for_key, add_staff, deactivate_staff, list_staff
 from .members import create_member, deactivate_member, get_member, list_members, update_member
 from .money import to_paise
 from .outbox import dead_messages, relay_once
-from .payments import (assign_credit, get_credit, reassign_credit, record_credit, reverse_credit,
-                       review_queue, split_credit)
+from .payments import assign_credit, get_credit, record_credit, reverse_credit, review_queue, split_credit
 from .periods import IST, period_of, today_ist, utc_now
 from .reminders import queue_reminders
 from .reports import ageing, collection_report, defaulters, statement
@@ -98,6 +100,15 @@ class ReassignIn(BaseModel):
     parts: list[Part]
 
 
+class StaffIn(BaseModel):
+    name: str
+    role: str = Field(examples=["clerk"])
+
+
+class DecisionIn(BaseModel):
+    note: str | None = None
+
+
 class ReverseIn(BaseModel):
     reason: str | None = None
     reference: str | None = None
@@ -150,7 +161,7 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
             return JSONResponse(status_code=status, content={"detail": str(exc)})
         return handler
 
-    for error, status in ((NotFound, 404), (Conflict, 409), (PreconditionFailed, 412),
+    for error, status in ((Forbidden, 403), (NotFound, 404), (Conflict, 409), (PreconditionFailed, 412),
                           (PreconditionRequired, 428), (ValueError, 422)):
         app.add_exception_handler(error, _error(status))
 
@@ -158,11 +169,37 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         with pool.connection() as c:
             yield c
 
-    def institution(x_api_key: str | None = Header(None), c=Depends(conn)) -> int:
-        inst = institution_for_key(c, x_api_key)
-        if inst is None:
+    def _identify(key: str) -> Actor | None:
+        with pool.connection() as c:
+            return actor_for_key(c, key)
+
+    @app.middleware("http")
+    async def identify(request: Request, call_next):
+        # Look the key up once, here, and set who is acting for everything this
+        # request does: the context is copied into the thread that runs the endpoint,
+        # so the audit log records the person without every function passing them along.
+        key = request.headers.get("x-api-key")
+        who = await run_in_threadpool(_identify, key) if key else None
+        request.state.actor = who
+        token = current_actor.set(who.staff_id if who else None)
+        try:
+            return await call_next(request)
+        finally:
+            current_actor.reset(token)
+
+    def actor(request: Request, x_api_key: str | None = Header(None)) -> Actor:
+        who = request.state.actor
+        if who is None:
             raise HTTPException(status_code=401, detail="missing or unknown X-API-Key")
-        return inst
+        return who
+
+    def institution(who: Actor = Depends(actor)) -> int:
+        return who.institution_id
+
+    def owner(who: Actor = Depends(actor)) -> Actor:
+        if who.role != "owner":
+            raise Forbidden("only an owner can do this")
+        return who
 
     @app.get("/health")
     def health(c=Depends(conn)):
@@ -247,8 +284,12 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return get_credit(c, inst, credit_id)
 
     @app.post("/bank-credits/{credit_id}/reassign")
-    def reassign(credit_id: int, body: ReassignIn, inst=Depends(institution), c=Depends(conn)):
-        return reassign_credit(c, inst, credit_id, _parts(body.parts))
+    def reassign(credit_id: int, body: ReassignIn, response: Response, who: Actor = Depends(actor),
+                 c=Depends(conn)):
+        result = request_reassign(c, who.institution_id, who, credit_id, _parts(body.parts))
+        if result["status"] == "pending_approval":
+            response.status_code = 202          # accepted, not done: a second person must approve
+        return result
 
     @app.post("/bank-credits/{credit_id}/reverse")
     def reverse(credit_id: int, body: ReverseIn, inst=Depends(institution), c=Depends(conn)):
@@ -288,6 +329,39 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     @app.get("/outbox/dead")
     def dead(inst=Depends(institution), c=Depends(conn)):
         return dead_messages(c, inst)
+
+    # staff and approvals
+
+    @app.get("/me")
+    def me(who: Actor = Depends(actor)):
+        return {"staff_id": who.staff_id, "name": who.name, "role": who.role,
+                "institution_id": who.institution_id}
+
+    @app.post("/staff", status_code=201)
+    def new_staff(body: StaffIn, who: Actor = Depends(owner), c=Depends(conn)):
+        return add_staff(c, who.institution_id, body.name, body.role)
+
+    @app.get("/staff")
+    def staff(who: Actor = Depends(owner), c=Depends(conn)):
+        return list_staff(c, who.institution_id)
+
+    @app.post("/staff/{staff_id}/deactivate")
+    def remove_staff(staff_id: int, who: Actor = Depends(owner), c=Depends(conn)):
+        return deactivate_staff(c, who.institution_id, staff_id)
+
+    @app.get("/approvals")
+    def approvals(status: str | None = "pending", inst=Depends(institution), c=Depends(conn)):
+        return list_approvals(c, inst, None if status == "all" else status)
+
+    @app.post("/approvals/{approval_id}/approve")
+    def approve(approval_id: int, body: DecisionIn | None = None, who: Actor = Depends(actor),
+                c=Depends(conn)):
+        return decide(c, who.institution_id, who, approval_id, approve=True, note=body.note if body else None)
+
+    @app.post("/approvals/{approval_id}/reject")
+    def reject(approval_id: int, body: DecisionIn | None = None, who: Actor = Depends(actor),
+               c=Depends(conn)):
+        return decide(c, who.institution_id, who, approval_id, approve=False, note=body.note if body else None)
 
     # daily close and alerts
 

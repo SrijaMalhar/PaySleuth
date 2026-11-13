@@ -23,6 +23,9 @@ def main(argv=None) -> int:
     create.add_argument("name")
     create.add_argument("--late-fee", default="0", help="late fee in rupees, e.g. 100")
     create.add_argument("--grace-days", type=int, default=0)
+    create.add_argument("--approval-threshold", default="0",
+                        help="reassignments of credits above this many rupees need a second person; 0 = off")
+    create.add_argument("--owner-name", default="Owner")
     create.add_argument("--quiet-start", type=int, default=21, help="hour (IST) quiet hours begin")
     create.add_argument("--quiet-end", type=int, default=8, help="hour (IST) quiet hours end")
     args = parser.parse_args(argv)
@@ -34,10 +37,12 @@ def main(argv=None) -> int:
             print("schema is up to date")
             return 0
         late_fee = 0 if args.late_fee in ("0", "0.00") else to_paise(args.late_fee)
+        threshold = 0 if args.approval_threshold in ("0", "0.00") else to_paise(args.approval_threshold)
         with pool.connection() as conn:
             institution_id, key = create_institution(
                 conn, args.name, late_fee=late_fee, grace_days=args.grace_days,
-                quiet_start=args.quiet_start, quiet_end=args.quiet_end)
+                quiet_start=args.quiet_start, quiet_end=args.quiet_end, approval_threshold=threshold,
+                owner_name=args.owner_name)
         print(f"institution_id={institution_id}")
         print(f"api_key={key}")
         print("Store the key now; it cannot be shown again.", file=sys.stderr)

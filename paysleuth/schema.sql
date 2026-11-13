@@ -6,13 +6,28 @@
 CREATE TABLE IF NOT EXISTS institutions (
     id              bigserial   PRIMARY KEY,
     name            text        NOT NULL,
-    api_key_hash    text        NOT NULL UNIQUE,   -- sha256 of the key; the key itself is never stored
     late_fee        bigint      NOT NULL DEFAULT 0 CHECK (late_fee >= 0),
     grace_days      integer     NOT NULL DEFAULT 0 CHECK (grace_days BETWEEN 0 AND 60),
     quiet_start     smallint    NOT NULL DEFAULT 21 CHECK (quiet_start BETWEEN 0 AND 23),
     quiet_end       smallint    NOT NULL DEFAULT 8  CHECK (quiet_end BETWEEN 0 AND 23),
+    -- A reassignment of a credit larger than this needs a second person. 0 turns the rule off.
+    approval_threshold bigint   NOT NULL DEFAULT 0 CHECK (approval_threshold >= 0),
     created_at      timestamptz NOT NULL DEFAULT now()
 );
+
+-- The people who use an institution's account. Each has their own API key.
+-- Like institutions, this table has no row-level security policy: a key must be
+-- looked up before the institution is known. Every query filters by institution_id.
+CREATE TABLE IF NOT EXISTS staff (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    name            text        NOT NULL,
+    role            text        NOT NULL CHECK (role IN ('owner', 'clerk')),
+    api_key_hash    text        NOT NULL UNIQUE,   -- sha256 of the key; the key itself is never stored
+    active          boolean     NOT NULL DEFAULT true,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS staff_institution ON staff (institution_id);
 
 CREATE TABLE IF NOT EXISTS members (
     id              bigserial   PRIMARY KEY,
@@ -35,6 +50,7 @@ CREATE INDEX IF NOT EXISTS members_institution ON members (institution_id);
 CREATE TABLE IF NOT EXISTS audit_log (
     id              bigserial   PRIMARY KEY,
     institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    actor_id        bigint      REFERENCES staff(id),   -- who did it; NULL for the system (worker, import rules)
     action          text        NOT NULL,
     entity          text        NOT NULL,
     entity_id       bigint,
@@ -196,6 +212,27 @@ CREATE TABLE IF NOT EXISTS daily_closes (
     PRIMARY KEY (institution_id, day)
 );
 
+-- Maker-checker: a large reassignment waits here until a second person decides.
+-- The CHECK makes "approved by the person who asked" impossible at the database level.
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    action          text        NOT NULL CHECK (action IN ('reassign_credit')),
+    bank_credit_id  bigint      NOT NULL REFERENCES bank_credits(id),
+    amount          bigint      NOT NULL,
+    payload         jsonb       NOT NULL,
+    requested_by    bigint      NOT NULL REFERENCES staff(id),
+    status          text        NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    decided_by      bigint      REFERENCES staff(id),
+    decided_at      timestamptz,
+    note            text,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CHECK (decided_by IS NULL OR decided_by <> requested_by),
+    CHECK ((status = 'pending') = (decided_by IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS approval_one_pending ON approval_requests (bank_credit_id)
+    WHERE status = 'pending';
+
 CREATE OR REPLACE FUNCTION forbid_change() RETURNS trigger LANGUAGE plpgsql AS $f$
 BEGIN
     RAISE EXCEPTION '% is append-only: insert a correction row instead of %', TG_TABLE_NAME, TG_OP
@@ -238,7 +275,8 @@ DECLARE t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
                              'bank_credits', 'payments', 'allocations', 'outbox',
-                             'credit_reversals', 'statement_imports', 'alerts', 'daily_closes'] LOOP
+                             'credit_reversals', 'statement_imports', 'alerts', 'daily_closes',
+                             'approval_requests'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class

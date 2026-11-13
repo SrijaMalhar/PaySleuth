@@ -52,7 +52,7 @@ def test_api_keys_are_stored_only_as_hashes(conn):
     assert institution_for_key(conn, key) == institution_id
     assert institution_for_key(conn, key + "x") is None
     assert institution_for_key(conn, None) is None
-    stored = conn.execute("SELECT api_key_hash FROM institutions WHERE id = %s",
+    stored = conn.execute("SELECT api_key_hash FROM staff WHERE institution_id = %s",
                           (institution_id,)).fetchone()["api_key_hash"]
     assert len(stored) == 64 and all(ch in "0123456789abcdef" for ch in stored)
     assert key not in stored

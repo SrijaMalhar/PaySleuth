@@ -76,6 +76,15 @@ MUTATIONS = [
              (("            EXECUTE format('CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON %I '\n"
                "                           'FOR EACH ROW EXECUTE FUNCTION forbid_change()', t);", "            NULL;"),),
              "tests/test_payments.py::test_the_database_refuses_to_change_or_delete_money_rows"),
+    Mutation("self-approval allowed", "paysleuth/approvals.py",
+             (("        if actor.staff_id == request[\"requested_by\"]:\n"
+               "            raise Forbidden(\"the person who asked for a reassignment cannot be the one who approves it\")\n",
+               ""),),
+             "tests/test_staff.py::test_nobody_can_approve_their_own_request"),
+    Mutation("approval row lock removed", "paysleuth/approvals.py",
+             (("\"SELECT * FROM approval_requests WHERE id = %s FOR UPDATE\"",
+               "\"SELECT * FROM approval_requests WHERE id = %s\""),),
+             "tests/test_staff.py::test_two_approvers_at_once_apply_it_once"),
 ]
 
 

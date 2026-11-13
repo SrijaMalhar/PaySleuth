@@ -1,7 +1,7 @@
 """Domain errors.
 
 Business code raises these and knows nothing about HTTP. Only api.py maps them
-to status codes (404, 409, 412, 428), so the same functions run unchanged from
+to status codes (403, 404, 409, 412, 428), so the same functions run unchanged from
 the API, the background worker and the tests.
 """
 
@@ -12,6 +12,10 @@ class NotFound(Exception):
 
 class Conflict(Exception):
     """The request contradicts what is already recorded."""
+
+
+class Forbidden(Exception):
+    """The person is known, but is not allowed to do this."""
 
 
 class PreconditionFailed(Exception):
