@@ -7,6 +7,7 @@ nothing here is mocked.
 import os
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 
 import psycopg
 import pytest
@@ -16,6 +17,8 @@ from paysleuth.db import make_pool, migrate, tenant_tx
 from paysleuth.institutions import create_institution
 from paysleuth.members import create_member
 from paysleuth.money import to_paise
+from paysleuth.periods import IST
+from paysleuth.statements import Credit
 
 DSN = os.environ.get("PAYSLEUTH_TEST_DATABASE_URL",
                      "postgresql://paysleuth:paysleuth@localhost:5432/paysleuth_test")
@@ -65,6 +68,22 @@ def add_member(conn, inst, name="Diya", fee="2000", *, billing_day=5, start="202
     return create_member(conn, inst, name=name, monthly_fee=to_paise(fee), billing_day=billing_day,
                          start_period=start, guardian_name=guardian, phone=phone,
                          concession_pct=concession, upi_ids=upi_ids)["id"]
+
+
+def credit(utr="615412345601", amount="2000", *, upi=None, name=None, note=None,
+           at=None, channel="UPI", line=0) -> Credit:
+    """A bank credit as the statement parser would produce it. amount is in rupees."""
+    return Credit(utr=utr, amount=to_paise(amount),
+                  received_at=at or datetime(2026, 6, 10, 10, 0, tzinfo=IST), channel=channel,
+                  payer_upi_id=upi, payer_name=name, note=note, line=line)
+
+
+def receipts(conn, inst, member_id=None) -> list[dict]:
+    """Queued payment receipts, oldest first."""
+    with tenant_tx(conn, inst):
+        return [r["payload"] for r in conn.execute(
+            "SELECT payload FROM outbox WHERE kind = 'payment_receipt' "
+            "AND (member_id = %s OR %s::bigint IS NULL) ORDER BY id", (member_id, member_id)).fetchall()]
 
 
 def money(conn, inst, member_id) -> dict:

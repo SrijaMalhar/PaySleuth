@@ -128,6 +128,32 @@ CREATE TABLE IF NOT EXISTS allocations (
 );
 CREATE INDEX IF NOT EXISTS allocations_charge ON allocations (charge_id);
 
+-- Transactional outbox: a message is inserted in the same transaction as the
+-- change it reports, and workers deliver it afterwards.
+CREATE TABLE IF NOT EXISTS outbox (
+    id               bigserial   PRIMARY KEY,
+    institution_id   bigint      NOT NULL REFERENCES institutions(id),
+    message_id       uuid        NOT NULL UNIQUE,      -- also in the payload, so a gateway can drop repeats
+    kind             text        NOT NULL CHECK (kind IN ('payment_receipt', 'overdue_reminder')),
+    member_id        bigint      NOT NULL REFERENCES members(id),
+    charge_id        bigint      REFERENCES charges(id),
+    dedupe_key       text,                             -- reminder:<charge>:<stage>, never queued twice
+    payload          jsonb       NOT NULL,
+    quiet_hours      boolean     NOT NULL DEFAULT false,
+    status           text        NOT NULL DEFAULT 'pending'
+                                 CHECK (status IN ('pending', 'sending', 'sent', 'skipped', 'dead')),
+    attempts         integer     NOT NULL DEFAULT 0,
+    next_attempt_at  timestamptz NOT NULL DEFAULT now(),
+    claimed_at       timestamptz,
+    last_error       text,
+    sent_at          timestamptz,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (institution_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS outbox_ready  ON outbox (institution_id, status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS outbox_member ON outbox (member_id, kind, status, id);
+CREATE INDEX IF NOT EXISTS outbox_charge ON outbox (charge_id, id) WHERE charge_id IS NOT NULL;
+
 -- Row-level security: a transaction sees only the institution named in
 -- app.institution_id, and sees nothing at all when none is set.
 --
@@ -137,7 +163,7 @@ DO $$
 DECLARE t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
-                             'bank_credits', 'payments', 'allocations'] LOOP
+                             'bank_credits', 'payments', 'allocations', 'outbox'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class

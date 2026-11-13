@@ -2,13 +2,15 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from conftest import add_member, charges_of, money
+from conftest import add_member, charges_of, credit, money
 from paysleuth.allocation import settle_member
 from paysleuth.charges import apply_late_fees, bill_member, concession_amount, run_billing
 from paysleuth.db import lock_members, tenant_tx
 from paysleuth.errors import Conflict, PreconditionFailed
 from paysleuth.members import (deactivate_member, get_member, normalise_phone, normalise_upi_id,
                                update_member)
+from paysleuth.payments import record_credit
+from paysleuth.periods import IST
 
 
 def _periods(conn, inst, member_id):
@@ -164,3 +166,23 @@ def test_upi_ids_and_phones_are_normalised():
 def test_reference_codes_follow_the_member_id(conn, inst):
     diya = add_member(conn, inst)
     assert get_member(conn, inst, diya)["ref_code"] == f"PS{1000 + diya}"
+
+
+# --- billing with real payments ------------------------------------------------------------
+
+def test_no_late_fee_once_the_fee_is_paid(conn, inst):
+    diya = add_member(conn, inst, start="2026-06")
+    run_billing(conn, inst, date(2026, 6, 1))
+    record_credit(conn, inst, credit(note=f"PS{1000 + diya}", at=datetime(2026, 6, 7, tzinfo=IST)))
+    assert apply_late_fees(conn, inst, date(2026, 6, 20)) == []
+
+
+def test_a_part_paid_month_gets_a_late_fee_and_both_can_be_cleared(conn, inst):
+    diya = add_member(conn, inst, start="2026-06")
+    run_billing(conn, inst, date(2026, 6, 1))
+    record_credit(conn, inst, credit(utr="615412345601", amount="1500", note=f"PS{1000 + diya}"))
+    apply_late_fees(conn, inst, date(2026, 6, 20))
+    assert money(conn, inst, diya)["outstanding"] == 50000 + 10000
+    record_credit(conn, inst, credit(utr="615412345602", amount="600", note=f"PS{1000 + diya}",
+                                     at=datetime(2026, 6, 21, tzinfo=IST)))
+    assert [c["paid"] for c in charges_of(conn, inst, diya)] == [200000, 10000]
