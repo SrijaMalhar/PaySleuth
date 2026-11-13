@@ -35,10 +35,14 @@ services:
       - key: PAYSLEUTH_LOG_LEVEL
         value: INFO
 
+  # Render's free tier has no background workers, so this one needs a paid plan.
+  # To stay free, delete this service and use .github/workflows/scheduled-jobs.yml
+  # instead: every job the worker runs is also an endpoint, and all of them are
+  # idempotent, so an hourly poke is equivalent to the worker polling.
   - type: worker
     name: paysleuth-worker
     runtime: docker
-    plan: free
+    plan: starter
     dockerCommand: python -m paysleuth.worker
     envVars:
       - key: PAYSLEUTH_DATABASE_URL

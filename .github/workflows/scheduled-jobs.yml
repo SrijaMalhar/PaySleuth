@@ -1,0 +1,51 @@
+name: Scheduled jobs
+# An alternative to running paysleuth.worker, for hosts whose free tier has no
+# background workers. Every job the worker runs is also an endpoint, and every
+# one is idempotent, so poking them on a schedule is equivalent to the worker
+# polling — only coarser.
+#
+# To use it, set two repository secrets:
+#   PAYSLEUTH_URL      https://your-service.onrender.com
+#   PAYSLEUTH_API_KEY  an owner key from `python -m paysleuth.cli create-institution`
+#
+# Until both are set the workflow exits without doing anything, so a fork does
+# not fail. With a real worker running, leave this disabled: both are safe
+# together (the relay claims with SKIP LOCKED) but it is needless traffic.
+on:
+  schedule:
+    - cron: "17 * * * *"          # hourly, off the hour so it is not queued behind everything else
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Billing, late fees, reminders, relay, daily close
+        env:
+          URL: ${{ secrets.PAYSLEUTH_URL }}
+          KEY: ${{ secrets.PAYSLEUTH_API_KEY }}
+        run: |
+          if [ -z "$URL" ] || [ -z "$KEY" ]; then
+            echo "PAYSLEUTH_URL or PAYSLEUTH_API_KEY is not set; nothing to do."
+            exit 0
+          fi
+          post() {
+            echo "== POST $1"
+            curl -fsS --retry 3 --retry-connrefused --max-time 120 \
+                 -X POST -H "X-API-Key: $KEY" "$URL$1"
+            echo
+          }
+          # Order matters: bill before reminding, remind before relaying, close last
+          # so it sees the result of everything above it.
+          post /billing/run
+          post /reminders/run
+          # The relay sends one batch per call, so loop until it claims nothing.
+          for _ in $(seq 20); do
+            claimed=$(curl -fsS --max-time 120 -X POST -H "X-API-Key: $KEY" "$URL/outbox/relay" \
+                      | python3 -c 'import json,sys; print(json.load(sys.stdin)["claimed"])')
+            echo "relay claimed $claimed"
+            [ "$claimed" = "0" ] && break
+          done
+          post /close/run
+          echo "== open alerts"
+          curl -fsS -H "X-API-Key: $KEY" "$URL/alerts"
