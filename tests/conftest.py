@@ -5,6 +5,7 @@ nothing here is mocked.
 """
 
 import os
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
@@ -100,3 +101,68 @@ def charges_of(conn, inst, member_id) -> list[dict]:
                  FROM charges c LEFT JOIN allocations a ON a.charge_id = c.id
                 WHERE c.member_id = %s GROUP BY c.id ORDER BY c.due_date, c.id""",
             (member_id,)).fetchall()
+
+
+# --- proof tools -----------------------------------------------------------------------
+
+def together(pool, n, fn):
+    """Run fn(conn, i) on n threads, released at the same instant. Returns results or exceptions by i.
+
+    Each thread takes its own connection before the barrier, so they all reach
+    PostgreSQL together instead of queueing for the pool.
+    """
+    barrier = threading.Barrier(n)
+    out = [None] * n
+
+    def run(i):
+        with pool.connection() as c:
+            barrier.wait()
+            try:
+                out[i] = fn(c, i)
+            except Exception as error:
+                out[i] = error
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return out
+
+
+def check_books(conn, inst) -> list[str]:
+    """The rules that must always hold. Returns the broken ones; empty means healthy."""
+    broken = []
+    with tenant_tx(conn, inst):
+        def rows(sql):
+            return conn.execute(sql).fetchall()
+
+        for r in rows("""SELECT c.id, c.amount, SUM(a.amount) AS paid FROM charges c
+                           JOIN allocations a ON a.charge_id = c.id GROUP BY c.id
+                         HAVING SUM(a.amount) > c.amount"""):
+            broken.append(f"charge {r['id']} is paid {r['paid']} of {r['amount']}")
+        for r in rows("""SELECT p.id, p.amount, SUM(a.amount) AS spent FROM payments p
+                           JOIN allocations a ON a.payment_id = p.id GROUP BY p.id
+                         HAVING SUM(a.amount) > p.amount"""):
+            broken.append(f"payment {r['id']} is spent {r['spent']} of {r['amount']}")
+        for r in rows("""SELECT a.id FROM allocations a JOIN payments p ON p.id = a.payment_id
+                           JOIN charges c ON c.id = a.charge_id WHERE p.member_id <> c.member_id"""):
+            broken.append(f"allocation {r['id']} pays another member's charge")
+        for r in rows("""SELECT b.id, b.status, b.amount, COALESCE(SUM(p.amount), 0) AS applied
+                           FROM bank_credits b LEFT JOIN payments p ON p.bank_credit_id = b.id
+                          GROUP BY b.id
+                         HAVING (b.status = 'matched' AND COALESCE(SUM(p.amount), 0) <> b.amount)
+                             OR (b.status = 'needs_review' AND COUNT(p.id) > 0)"""):
+            broken.append(f"credit {r['id']} ({r['status']}) of {r['amount']} has {r['applied']} applied")
+        for r in rows("""WITH unspent AS (
+                             SELECT p.member_id FROM payments p LEFT JOIN allocations a ON a.payment_id = p.id
+                              GROUP BY p.id HAVING p.amount - COALESCE(SUM(a.amount), 0) > 0),
+                           unpaid AS (
+                             SELECT c.member_id FROM charges c LEFT JOIN allocations a ON a.charge_id = c.id
+                              GROUP BY c.id HAVING c.amount - COALESCE(SUM(a.amount), 0) > 0)
+                         SELECT DISTINCT member_id FROM unspent WHERE member_id IN (SELECT member_id FROM unpaid)"""):
+            broken.append(f"member {r['member_id']} has unused money while owing")
+        for r in rows("""SELECT member_id, period, kind FROM charges GROUP BY member_id, period, kind
+                         HAVING COUNT(*) > 1"""):
+            broken.append(f"member {r['member_id']} billed twice for {r['period']} {r['kind']}")
+    return broken

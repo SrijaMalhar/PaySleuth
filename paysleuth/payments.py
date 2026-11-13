@@ -208,15 +208,15 @@ def reassign_credit(conn, inst: int, credit_id: int, parts) -> dict:
         old = _current_parts(conn, credit_id)
         if old == parts:
             return {"credit": credit_view(row), "changed": False, "applied": []}
-        affected = {m for m, _ in old} | {m for m, _ in parts}
-        lock_members(conn, affected)
+        affected = [m for m, _ in old] + [m for m, _ in parts]       # "from", then "to"...
+        lock_members(conn, affected)                                  # ...but locked in id order
         conn.execute("DELETE FROM allocations WHERE payment_id IN "
                      "(SELECT id FROM payments WHERE bank_credit_id = %s)", (credit_id,))
         conn.execute("DELETE FROM payments WHERE bank_credit_id = %s", (credit_id,))
         row = conn.execute("UPDATE bank_credits SET match_rule = 'manual' WHERE id = %s RETURNING *",
                            (credit_id,)).fetchone()
         applied = _apply_parts(conn, inst, row, parts)
-        for member_id in sorted(affected):
+        for member_id in sorted(set(affected)):
             # The old owner may have other unspent credit that can now pay what reopened.
             settle_member(conn, inst, member_id)
         audit.record(conn, inst, "credit.reassigned", "bank_credit", credit_id,

@@ -1,0 +1,31 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
+    env:
+      PAYSLEUTH_TEST_DATABASE_URL: postgresql://paysleuth:paysleuth@localhost:5432/paysleuth_test
+      PAYSLEUTH_TEST_SUPERUSER_URL: postgresql://postgres:postgres@localhost:5432/paysleuth_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Create the app role and databases
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -f docker/initdb.sql
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: python -m pyflakes paysleuth tests tools bench
+      - name: Tests
+        run: python -m pytest -q
+      - name: Mutation check
+        run: python tools/mutation_check.py

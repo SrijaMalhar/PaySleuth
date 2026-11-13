@@ -1,0 +1,13 @@
+machine: x86_64, 2 cores, Python 3.12.3
+
+import scaling: 4675 statement lines, 500 members, 694 groups
+workers  seconds  lines/s speed-up  fingerprint
+      1     14.3      328    1.00x  1c0a9b351413
+      2      9.3      504    1.54x  1c0a9b351413
+      4      9.4      496    1.51x  1c0a9b351413
+      8     12.1      387    1.18x  1c0a9b351413
+fingerprints identical
+
+lock granularity: 8 threads x 100 transfers
+  different members    303.7 transfers/s
+  one member           190.3 transfers/s
