@@ -29,3 +29,16 @@ jobs:
         run: python -m pytest -q
       - name: Mutation check
         run: python tools/mutation_check.py
+      - name: Demo seed
+        run: python -m tools.seed_demo
+        env:
+          PAYSLEUTH_DATABASE_URL: postgresql://paysleuth:paysleuth@localhost:5432/paysleuth
+      - name: Docker image builds and serves
+        run: |
+          docker build -t paysleuth .
+          docker run -d --name api --network host \
+            -e PAYSLEUTH_DATABASE_URL=postgresql://paysleuth:paysleuth@localhost:5432/paysleuth paysleuth
+          for i in $(seq 30); do curl -fsS localhost:8000/health && break; sleep 1; done
+          curl -fsS localhost:8000/health
+          curl -fsS localhost:8000/metrics | grep -q paysleuth_members_active
+          docker logs api
