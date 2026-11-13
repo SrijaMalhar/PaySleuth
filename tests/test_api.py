@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -219,3 +220,18 @@ def test_a_reversal_through_the_api(api):
     assert api.client.get(f"/members/{diya['id']}").json()["outstanding"] == "2000.00"
     history = api.client.get(f"/bank-credits/{credit['id']}").json()
     assert history["parts"] == [] and [h["amount"] for h in history["history"]] == ["2000.00", "-2000.00"]
+
+
+def test_daily_close_statements_and_alerts_through_the_api(api):
+    lines = (Path(__file__).parent.parent / "sample_data" / "june_2026_statement.csv").read_text().splitlines()
+    broken = "\n".join(lines[:3] + lines[4:]) + "\n"                   # the Rs 1,800 line went missing
+    summary = api.client.post("/bank-credits/import", files={"file": ("june.csv", broken, "text/csv")}).json()
+    assert summary["statement"]["continuity"] == "broken"
+    [alert] = api.client.get("/alerts").json()
+    assert alert["kind"] == "statement_broken"
+    assert api.client.post("/close/run").json()["status"] == "attention"
+    assert api.client.post(f"/alerts/{alert['id']}/resolve").json()["status"] == "resolved"
+    assert api.client.post("/close/run").json()["status"] == "clean"
+    assert [c["status"] for c in api.client.get("/close").json()] == ["clean"]
+    assert api.client.get("/statements").json()[0]["breaks"][0]["unaccounted"] == "1800.00"
+    assert api.client.post("/alerts/999/resolve").status_code == 404

@@ -37,10 +37,22 @@ class Reversal:
     line: int = 0
 
 
+@dataclass(frozen=True)
+class StatementRow:
+    """Any money line, credit or debit, as printed: used to check the running balance."""
+    line: int
+    at: datetime
+    debit: int
+    credit: int
+    balance: int | None
+    narration: str = ""
+
+
 @dataclass
 class ParseResult:
     credits: list[Credit] = field(default_factory=list)   # not "= []": one list per instance
     reversals: list[Reversal] = field(default_factory=list)
+    rows: list[StatementRow] = field(default_factory=list)
     skipped_debits: int = 0
     errors: list[dict] = field(default_factory=list)
 
@@ -162,6 +174,38 @@ def _blank_amount(text: str) -> bool:
     return text.replace(",", "").strip() in ("", "-", "0", "0.0", "0.00")
 
 
+def _amount_or_zero(text: str) -> int:
+    return 0 if _blank_amount(text) else to_paise(text)
+
+
+def _signed_paise(text: str) -> int | None:
+    """A balance, which may be blank, negative (overdrawn) or carry a Cr/Dr suffix."""
+    value = text.replace(",", "").strip().upper()
+    if not value:
+        return None
+    sign = 1
+    if value.endswith("DR"):
+        sign = -1
+    value = re.sub(r"\s*(CR|DR)$", "", value)
+    if value.startswith("-"):
+        sign, value = -sign, value[1:]
+    if value in ("0", "0.0", "0.00"):
+        return 0
+    return sign * to_paise(value)
+
+
+def _ledger_row(row: list[str], columns: dict, line: int) -> StatementRow | None:
+    try:
+        return StatementRow(
+            line=line, at=_parse_date(_cell(row, columns["date"])),
+            debit=_amount_or_zero(_cell(row, columns.get("debit"))),
+            credit=_amount_or_zero(_cell(row, columns["credit"])),
+            balance=_signed_paise(_cell(row, columns.get("balance"))),
+            narration=" ".join(_cell(row, columns["narration"]).split()))
+    except ValueError:
+        return None          # the continuity check will notice the hole this leaves
+
+
 def parse_statement(text: str) -> ParseResult:
     """Parse a bank CSV. Debits are counted and skipped; a bad row is reported, the rest still import."""
     rows = list(csv.reader(io.StringIO(text)))
@@ -179,6 +223,9 @@ def parse_statement(text: str) -> ParseResult:
     for line, row in enumerate(rows[1:], start=2):
         if not any(cell.strip() for cell in row):
             continue
+        ledger = _ledger_row(row, columns, line)
+        if ledger is not None:
+            result.rows.append(ledger)
         credit_text = _cell(row, columns["credit"])
         if _blank_amount(credit_text):
             debit_text = _cell(row, columns.get("debit"))

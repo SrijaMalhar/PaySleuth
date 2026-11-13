@@ -151,6 +151,51 @@ CREATE TABLE IF NOT EXISTS credit_reversals (
     created_at      timestamptz NOT NULL DEFAULT now()
 );
 
+-- One row per statement file: what it said about itself, so the next one can be checked against it.
+CREATE TABLE IF NOT EXISTS statement_imports (
+    id               bigserial   PRIMARY KEY,
+    institution_id   bigint      NOT NULL REFERENCES institutions(id),
+    account          text        NOT NULL DEFAULT 'main',
+    file_sha256      text        NOT NULL,
+    first_at         timestamptz,
+    last_at          timestamptz,
+    opening_balance  bigint,
+    closing_balance  bigint,
+    total_credits    bigint      NOT NULL DEFAULT 0,
+    total_debits     bigint      NOT NULL DEFAULT 0,
+    line_count       integer     NOT NULL DEFAULT 0,
+    continuity       text        NOT NULL CHECK (continuity IN ('ok', 'broken', 'no_balance')),
+    follows          text        NOT NULL CHECK (follows IN ('first', 'continues', 'gap', 'overlap', 'unknown')),
+    breaks           jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (institution_id, file_sha256)
+);
+CREATE INDEX IF NOT EXISTS statement_imports_order ON statement_imports (institution_id, account, last_at);
+
+-- Things a person must look at. dedupe_key makes raising the same alert twice a no-op.
+CREATE TABLE IF NOT EXISTS alerts (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    kind            text        NOT NULL,
+    message         text        NOT NULL,
+    details         jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    dedupe_key      text        NOT NULL,
+    status          text        NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    resolved_at     timestamptz,
+    UNIQUE (institution_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS alerts_open ON alerts (institution_id, status, id);
+
+CREATE TABLE IF NOT EXISTS daily_closes (
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    day             date        NOT NULL,
+    status          text        NOT NULL CHECK (status IN ('clean', 'attention')),
+    figures         jsonb       NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (institution_id, day)
+);
+
 CREATE OR REPLACE FUNCTION forbid_change() RETURNS trigger LANGUAGE plpgsql AS $f$
 BEGIN
     RAISE EXCEPTION '% is append-only: insert a correction row instead of %', TG_TABLE_NAME, TG_OP
@@ -193,7 +238,7 @@ DECLARE t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
                              'bank_credits', 'payments', 'allocations', 'outbox',
-                             'credit_reversals'] LOOP
+                             'credit_reversals', 'statement_imports', 'alerts', 'daily_closes'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class

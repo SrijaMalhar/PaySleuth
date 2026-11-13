@@ -18,7 +18,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import audit
+from .alerts import list_alerts, resolve_alert
 from .charges import apply_late_fees, run_billing
+from .close import list_statements, recent_closes, run_close
 from .db import make_pool, migrate
 from .errors import Conflict, NotFound, PreconditionFailed, PreconditionRequired
 from .importer import import_statement
@@ -229,7 +231,7 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
 
     @app.post("/bank-credits/import")
     def import_csv(file: UploadFile = File(...), workers: int = Query(8, ge=1, le=64),
-                   inst=Depends(institution)):
+                   account: str = Query("main", max_length=40), inst=Depends(institution)):
         data = file.file.read(MAX_UPLOAD + 1)
         if len(data) > MAX_UPLOAD:
             raise HTTPException(status_code=413, detail="statement is larger than 10 MB")
@@ -238,7 +240,7 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         except UnicodeDecodeError:
             raise ValueError("statement must be a UTF-8 CSV file") from None
         # Keep connections free for other requests while the import runs.
-        return import_statement(pool, inst, text, workers=min(workers, max(1, pool_size - 2)))
+        return import_statement(pool, inst, text, workers=min(workers, max(1, pool_size - 2)), account=account)
 
     @app.get("/bank-credits/{credit_id}")
     def bank_credit(credit_id: int, inst=Depends(institution), c=Depends(conn)):
@@ -286,6 +288,28 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     @app.get("/outbox/dead")
     def dead(inst=Depends(institution), c=Depends(conn)):
         return dead_messages(c, inst)
+
+    # daily close and alerts
+
+    @app.post("/close/run")
+    def close(day: date | None = None, inst=Depends(institution), c=Depends(conn)):
+        return run_close(c, inst, day or today())
+
+    @app.get("/close")
+    def closes(inst=Depends(institution), c=Depends(conn)):
+        return recent_closes(c, inst)
+
+    @app.get("/statements")
+    def statements(inst=Depends(institution), c=Depends(conn)):
+        return list_statements(c, inst)
+
+    @app.get("/alerts")
+    def alerts(status: str | None = "open", inst=Depends(institution), c=Depends(conn)):
+        return list_alerts(c, inst, status=None if status == "all" else status)
+
+    @app.post("/alerts/{alert_id}/resolve")
+    def resolve(alert_id: int, inst=Depends(institution), c=Depends(conn)):
+        return resolve_alert(c, inst, alert_id)
 
     # reports
 

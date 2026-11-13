@@ -17,6 +17,8 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
+from .close import record_statement
+from .continuity import check_continuity
 from .db import tenant_tx
 from .errors import Conflict, NotFound
 from .matching import candidate_members
@@ -165,7 +167,17 @@ def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, 
     }
 
 
-def import_statement(pool, inst: int, text: str, *, workers: int = 8) -> dict:
+def import_statement(pool, inst: int, text: str, *, workers: int = 8, account: str = "main") -> dict:
+    """Import a statement, and check that it accounts for itself and follows the previous one.
+
+    A statement that fails the check is still imported, because its credit
+    lines are real facts, but it is flagged and an alert is raised instead of
+    the file being silently trusted.
+    """
     parsed = parse_statement(text)
-    return import_credits(pool, inst, parsed.credits, workers=workers, errors=parsed.errors,
-                          skipped_debits=parsed.skipped_debits, reversals=parsed.reversals)
+    with pool.connection() as conn:
+        statement = record_statement(conn, inst, text, check_continuity(parsed.rows), len(parsed.rows),
+                                     account)
+    summary = import_credits(pool, inst, parsed.credits, workers=workers, errors=parsed.errors,
+                             skipped_debits=parsed.skipped_debits, reversals=parsed.reversals)
+    return {**summary, "statement": statement}

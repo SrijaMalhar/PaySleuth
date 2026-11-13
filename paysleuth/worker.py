@@ -11,6 +11,7 @@ import os
 import time
 
 from .charges import apply_late_fees, run_billing
+from .close import run_close
 from .db import make_pool, migrate
 from .institutions import all_institution_ids
 from .notify import sender_from_env
@@ -31,8 +32,9 @@ def run_jobs(pool, today) -> None:
                 billed = run_billing(conn, inst, today)
                 late = apply_late_fees(conn, inst, today)
                 reminders = queue_reminders(conn, inst, today)
-                log.info("jobs institution=%s billed=%s late_fees=%s reminders=%s",
-                         inst, billed["charges_created"], len(late), reminders)
+                closed = run_close(conn, inst, today)
+                log.info("jobs institution=%s billed=%s late_fees=%s reminders=%s close=%s",
+                         inst, billed["charges_created"], len(late), reminders, closed["status"])
             except Exception:
                 log.exception("daily jobs failed for institution %s", inst)
 
