@@ -206,3 +206,16 @@ def test_deactivating_needs_the_etag_and_stops_billing(api):
     done = api.client.post(url, headers={"If-Match": '"1"'})
     assert done.status_code == 200 and done.json()["active"] is False
     assert api.client.post("/billing/run").json()["charges_created"] == 0
+
+
+def test_a_reversal_through_the_api(api):
+    diya = _member(api)
+    api.client.post("/billing/run")
+    credit = api.client.post("/bank-credits", json={"utr": "615412345601", "amount": "2000",
+                                                    "received_at": "2026-06-10T10:00:00+05:30",
+                                                    "note": diya["ref_code"]}).json()["credit"]
+    done = api.client.post(f"/bank-credits/{credit['id']}/reverse", json={"reason": "returned by the bank"})
+    assert done.status_code == 200 and done.json()["credit"]["status"] == "reversed"
+    assert api.client.get(f"/members/{diya['id']}").json()["outstanding"] == "2000.00"
+    history = api.client.get(f"/bank-credits/{credit['id']}").json()
+    assert history["parts"] == [] and [h["amount"] for h in history["history"]] == ["2000.00", "-2000.00"]

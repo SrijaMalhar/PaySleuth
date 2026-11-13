@@ -95,10 +95,11 @@ CREATE TABLE IF NOT EXISTS bank_credits (
     note            text,
     narration       text,
     received_at     timestamptz NOT NULL,
-    status          text        NOT NULL CHECK (status IN ('needs_review', 'matched')),
+    status          text        NOT NULL CHECK (status IN ('needs_review', 'matched', 'reversed')),
     match_rule      text        CHECK (match_rule IN ('ref_code', 'known_upi_id', 'sibling_split', 'manual')),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    CHECK ((status = 'matched') = (match_rule IS NOT NULL)),
+    CHECK (CASE status WHEN 'matched' THEN match_rule IS NOT NULL
+                       WHEN 'needs_review' THEN match_rule IS NULL ELSE true END),
     UNIQUE (institution_id, utr)
 );
 CREATE INDEX IF NOT EXISTS bank_credits_queue ON bank_credits (institution_id, status, received_at);
@@ -137,6 +138,19 @@ CREATE TABLE IF NOT EXISTS allocations (
 CREATE INDEX IF NOT EXISTS allocations_charge ON allocations (charge_id);
 CREATE INDEX IF NOT EXISTS allocations_payment ON allocations (payment_id);
 
+-- The bank took a credit back. A reversal is a new fact, recorded as its own
+-- row; the original credit and its payment rows stay, with correction rows.
+CREATE TABLE IF NOT EXISTS credit_reversals (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    bank_credit_id  bigint      NOT NULL UNIQUE REFERENCES bank_credits(id),   -- reversed at most once
+    amount          bigint      NOT NULL CHECK (amount > 0),
+    reference       text,                    -- the bank's reference for the return, if it gave one
+    reason          text,
+    reversed_at     timestamptz NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE OR REPLACE FUNCTION forbid_change() RETURNS trigger LANGUAGE plpgsql AS $f$
 BEGIN
     RAISE EXCEPTION '% is append-only: insert a correction row instead of %', TG_TABLE_NAME, TG_OP
@@ -149,7 +163,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     id               bigserial   PRIMARY KEY,
     institution_id   bigint      NOT NULL REFERENCES institutions(id),
     message_id       uuid        NOT NULL UNIQUE,      -- also in the payload, so a gateway can drop repeats
-    kind             text        NOT NULL CHECK (kind IN ('payment_receipt', 'overdue_reminder')),
+    kind             text        NOT NULL CHECK (kind IN ('payment_receipt', 'overdue_reminder', 'payment_reversed')),
     member_id        bigint      NOT NULL REFERENCES members(id),
     charge_id        bigint      REFERENCES charges(id),
     dedupe_key       text,                             -- reminder:<charge>:<stage>, never queued twice
@@ -178,7 +192,8 @@ DO $$
 DECLARE t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
-                             'bank_credits', 'payments', 'allocations', 'outbox'] LOOP
+                             'bank_credits', 'payments', 'allocations', 'outbox',
+                             'credit_reversals'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class

@@ -19,7 +19,7 @@ from .errors import Conflict, NotFound
 from .matching import candidate_members, decide, suggest
 from .members import normalise_upi_id
 from .money import to_rupees
-from .periods import IST
+from .periods import IST, utc_now
 from .statements import Credit
 
 _UTR = re.compile(r"^[A-Z0-9]{6,35}$")
@@ -191,6 +191,8 @@ def split_credit(conn, inst: int, credit_id: int, parts, remember_upi_id: bool =
     with tenant_tx(conn, inst):
         row = _lock_credit(conn, credit_id)     # two clerks cannot resolve it at once
         _check_parts(parts, row["amount"])
+        if row["status"] == "reversed":
+            raise Conflict(f"bank credit {credit_id} was reversed by the bank")
         if row["status"] == "matched":
             if _current_parts(conn, credit_id) == parts:
                 return {"credit": credit_view(row), "duplicate": True, "applied": []}   # a retried click
@@ -224,6 +226,8 @@ def reassign_credit(conn, inst: int, credit_id: int, parts) -> dict:
     parts = _normalise_parts(parts)
     with tenant_tx(conn, inst):
         row = _lock_credit(conn, credit_id)
+        if row["status"] == "reversed":
+            raise Conflict(f"bank credit {credit_id} was reversed by the bank")
         if row["status"] != "matched":
             raise Conflict(f"bank credit {credit_id} is not assigned yet; assign it instead")
         _check_parts(parts, row["amount"])
@@ -242,6 +246,45 @@ def reassign_credit(conn, inst: int, credit_id: int, parts) -> dict:
         audit.record(conn, inst, "credit.reassigned", "bank_credit", credit_id,
                      before=[list(p) for p in old], after=[list(p) for p in parts])
         return {"credit": credit_view(row), "changed": True, "applied": applied}
+
+
+def reverse_credit(conn, inst: int, credit_id: int, *, reason: str | None = None,
+                   reference: str | None = None, reversed_at=None) -> dict:
+    """The bank returned this credit: take its money back out of the books.
+
+    The reversal is recorded as a new row. The credit's payments are voided
+    with correction rows, which reopens the charges they paid; each member is
+    settled again in case other credit can cover what reopened; and each
+    member is told, through the outbox, in the same transaction.
+    """
+    with tenant_tx(conn, inst):
+        row = _lock_credit(conn, credit_id)
+        if row["status"] == "reversed":
+            return {"credit": credit_view(row), "duplicate": True, "reopened": []}
+        was = _current_parts(conn, credit_id)
+        lock_members(conn, [m for m, _ in was])
+        void_payments(conn, inst, credit_id)
+        conn.execute(
+            "INSERT INTO credit_reversals (institution_id, bank_credit_id, amount, reference, reason, reversed_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (inst, credit_id, row["amount"], reference, reason, reversed_at or utc_now()))
+        row = conn.execute("UPDATE bank_credits SET status = 'reversed' WHERE id = %s RETURNING *",
+                           (credit_id,)).fetchone()
+        reopened = []
+        for member_id, amount in was:
+            settle_member(conn, inst, member_id)
+            after = balances(conn, [member_id])[member_id]
+            member = conn.execute("SELECT ref_code, name, phone FROM members WHERE id = %s",
+                                  (member_id,)).fetchone()
+            notice = {"member_id": member_id, "ref_code": member["ref_code"], "member_name": member["name"],
+                      "phone": member["phone"], "utr": row["utr"], "amount": to_rupees(amount),
+                      "outstanding_after": to_rupees(after["outstanding"]),
+                      "credit_after": to_rupees(after["credit"])}
+            outbox.enqueue(conn, inst, kind="payment_reversed", member_id=member_id, payload=notice)
+            reopened.append({k: notice[k] for k in ("member_id", "ref_code", "amount", "outstanding_after")})
+        audit.record(conn, inst, "credit.reversed", "bank_credit", credit_id,
+                     was=[list(p) for p in was], reason=reason, reference=reference)
+        return {"credit": credit_view(row), "duplicate": False, "reopened": reopened}
 
 
 def get_credit(conn, inst: int, credit_id: int) -> dict:

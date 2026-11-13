@@ -27,9 +27,20 @@ class Credit:
     line: int = 0                     # position in the statement, for ties
 
 
+@dataclass(frozen=True)
+class Reversal:
+    """A debit line where the bank took an earlier credit back."""
+    utr: str                          # the UTR of the credit being returned
+    amount: int
+    reversed_at: datetime
+    narration: str | None = None
+    line: int = 0
+
+
 @dataclass
 class ParseResult:
     credits: list[Credit] = field(default_factory=list)   # not "= []": one list per instance
+    reversals: list[Reversal] = field(default_factory=list)
     skipped_debits: int = 0
     errors: list[dict] = field(default_factory=list)
 
@@ -46,6 +57,21 @@ _HYPHEN_UPI = re.compile(
     r"(?P<utr>\d{12})(?:-(?P<note>.*))?$")
 _NEFT_IMPS = re.compile(
     r"^(?P<channel>NEFT|IMPS)[/-](?P<utr>[A-Z0-9]{8,22})[/-](?P<name>[^/-]*)(?:[/-](?P<note>.*))?$")
+
+
+# A returned credit shows up as a debit that says so and quotes the original UTR:
+# "UPI/REV/615412345601/SUNITA SHARMA", "REV-UPI-615412345601", "UPI RETURN 615412345601".
+_REVERSAL_WORD = re.compile(r"(?<![A-Z])(?:REV|REVERSAL|RVSL|RETURN|RETURNED|RET)(?![A-Z])", re.IGNORECASE)
+_UTR_IN_TEXT = re.compile(r"(?<!\d)(\d{12})(?!\d)")
+
+
+def parse_reversal(narration: str | None) -> str | None:
+    """The UTR a debit narration says it is returning, or None if it is an ordinary debit."""
+    text = narration or ""
+    if not _REVERSAL_WORD.search(text):
+        return None
+    utrs = _UTR_IN_TEXT.findall(text)
+    return utrs[0] if len(utrs) == 1 else None
 
 
 def _clean(value: str | None) -> str | None:
@@ -155,8 +181,18 @@ def parse_statement(text: str) -> ParseResult:
             continue
         credit_text = _cell(row, columns["credit"])
         if _blank_amount(credit_text):
-            if not _blank_amount(_cell(row, columns.get("debit"))):
-                result.skipped_debits += 1
+            debit_text = _cell(row, columns.get("debit"))
+            if not _blank_amount(debit_text):
+                narration = " ".join(_cell(row, columns["narration"]).split())
+                returned_utr = parse_reversal(narration)
+                try:
+                    if returned_utr is None:
+                        raise ValueError
+                    result.reversals.append(Reversal(
+                        utr=returned_utr, amount=to_paise(debit_text), narration=narration, line=line,
+                        reversed_at=_parse_date(_cell(row, columns["date"]))))
+                except ValueError:
+                    result.skipped_debits += 1
             continue
         try:
             amount = to_paise(credit_text)

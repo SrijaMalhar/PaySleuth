@@ -26,7 +26,8 @@ from .institutions import institution_for_key
 from .members import create_member, deactivate_member, get_member, list_members, update_member
 from .money import to_paise
 from .outbox import dead_messages, relay_once
-from .payments import assign_credit, get_credit, reassign_credit, record_credit, review_queue, split_credit
+from .payments import (assign_credit, get_credit, reassign_credit, record_credit, reverse_credit,
+                       review_queue, split_credit)
 from .periods import IST, period_of, today_ist, utc_now
 from .reminders import queue_reminders
 from .reports import ageing, collection_report, defaulters, statement
@@ -93,6 +94,11 @@ class SplitIn(BaseModel):
 
 class ReassignIn(BaseModel):
     parts: list[Part]
+
+
+class ReverseIn(BaseModel):
+    reason: str | None = None
+    reference: str | None = None
 
 
 def _parts(parts: list[Part]) -> list[tuple[int, int]]:
@@ -241,6 +247,10 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     @app.post("/bank-credits/{credit_id}/reassign")
     def reassign(credit_id: int, body: ReassignIn, inst=Depends(institution), c=Depends(conn)):
         return reassign_credit(c, inst, credit_id, _parts(body.parts))
+
+    @app.post("/bank-credits/{credit_id}/reverse")
+    def reverse(credit_id: int, body: ReverseIn, inst=Depends(institution), c=Depends(conn)):
+        return reverse_credit(c, inst, credit_id, reason=body.reason, reference=body.reference)
 
     # review queue
 

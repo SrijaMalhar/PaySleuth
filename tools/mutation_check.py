@@ -50,7 +50,7 @@ MUTATIONS = [
                ""),),
              "tests/test_messages.py::test_a_members_receipts_arrive_in_payment_order_even_while_one_is_retried"),
     Mutation("UNIQUE (institution_id, utr) removed", "paysleuth/schema.sql",
-             (("(match_rule IS NOT NULL)),\n    UNIQUE (institution_id, utr)\n);", "(match_rule IS NOT NULL))\n);"),),
+             (("ELSE true END),\n    UNIQUE (institution_id, utr)\n);", "ELSE true END)\n);"),),
              "tests/test_concurrency.py::test_the_same_transfer_arriving_20_times_at_once_counts_once"),
     Mutation("optimistic version check removed", "paysleuth/members.py",
              (("f\"WHERE id = %(id)s AND version = %(expected)s RETURNING version\")",

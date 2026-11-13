@@ -21,7 +21,7 @@ from .db import tenant_tx
 from .errors import Conflict, NotFound
 from .matching import candidate_members
 from .members import normalise_upi_id
-from .payments import normalise_utr, record_credit
+from .payments import normalise_utr, record_credit, reverse_credit
 from .statements import Credit, parse_statement
 
 
@@ -107,8 +107,29 @@ def _process(pool, inst: int, group: list[Credit]) -> list[tuple]:
     return outcomes
 
 
+def _apply_reversals(pool, inst: int, reversals, problems: list[dict]) -> int:
+    """Apply the statement's returned credits, after every credit line is in."""
+    applied = 0
+    with pool.connection() as conn:
+        for reversal in sorted(reversals, key=lambda r: (r.reversed_at, r.line)):
+            with tenant_tx(conn, inst):
+                credit = conn.execute("SELECT id, amount FROM bank_credits WHERE utr = %s",
+                                      (reversal.utr,)).fetchone()
+            if credit is None:
+                problems.append({"line": reversal.line,
+                                 "error": f"reversal of UTR {reversal.utr}, which was never recorded"})
+            elif credit["amount"] != reversal.amount:
+                problems.append({"line": reversal.line,
+                                 "error": f"reversal of UTR {reversal.utr} is for a different amount"})
+            else:
+                result = reverse_credit(conn, inst, credit["id"], reason="returned by the bank",
+                                        reference=reversal.narration, reversed_at=reversal.reversed_at)
+                applied += not result["duplicate"]
+    return applied
+
+
 def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, errors=None,
-                   skipped_debits: int = 0) -> dict:
+                   skipped_debits: int = 0, reversals=()) -> dict:
     """Record many credits in parallel. Give the pool at least workers + 1 connections.
 
     Threads, not processes: the time is spent waiting on PostgreSQL, and Python
@@ -125,6 +146,7 @@ def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, 
         counts[outcome] += 1
         if outcome in ("conflict", "error"):
             problems.append({"line": line, "error": detail})
+    reversed_count = _apply_reversals(pool, inst, reversals, problems)
     elapsed = time.perf_counter() - started
     recorded = counts["matched"] + counts["needs_review"]
     return {
@@ -134,6 +156,7 @@ def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, 
         "duplicates": counts["duplicate"],
         "conflicts": counts["conflict"],
         "errors": len(problems) - counts["conflict"],
+        "reversals": reversed_count,
         "skipped_debits": skipped_debits,
         "groups": len(groups),
         "problems": sorted(problems, key=lambda p: p["line"]),
@@ -145,4 +168,4 @@ def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, 
 def import_statement(pool, inst: int, text: str, *, workers: int = 8) -> dict:
     parsed = parse_statement(text)
     return import_credits(pool, inst, parsed.credits, workers=workers, errors=parsed.errors,
-                          skipped_debits=parsed.skipped_debits)
+                          skipped_debits=parsed.skipped_debits, reversals=parsed.reversals)
