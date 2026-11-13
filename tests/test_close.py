@@ -257,3 +257,35 @@ def test_what_the_statement_said_about_itself_is_kept_and_reported(pool, conn, i
     assert first["repeated_lines"] == [7] and first["newest_first"] is False
     assert second["repeated_lines"] == [] and second["newest_first"] is True
     assert second["opening_balance"] == "10000.00" and second["closing_balance"] == "11500.00"
+
+
+def test_a_line_whose_amount_cannot_be_read_is_still_named(pool, conn, inst):
+    """The hole this guards: an unreadable first line leaves no ledger row, so the
+    running-balance check cannot see it either. Saying nothing would lose money quietly."""
+    text = _statement('01/06/2026,UPI/CR/615412345601/A/SBIN/a.b@oksbi/fees,,,"2,O00.00","12,000.00"',
+                      _line(2, "615412345602", "1,000.00", "13,000.00"))
+    summary = import_statement(pool, inst, text)
+    assert [e["line"] for e in parse_statement(text).errors] == [2]
+    assert summary["statement"]["credits_missing"] == [{"line": 2, "utr": None, "amount": None}]
+    [alert] = list_alerts(conn, inst)
+    assert alert["kind"] == "credits_missing" and alert["details"]["unreadable"] == 1
+    assert "amount could not be read" in alert["message"]
+    assert run_close(conn, inst, date(2026, 6, 20))["status"] == "attention"
+
+
+def test_a_rejected_line_is_named_with_its_amount(pool, conn, inst):
+    text = _statement(_line(1, "615412345601", "2,000.00", "12,000.00"),
+                      '02/06/2026,UPI/CR/615412345602/A/SBIN/bad upi@x/fees,,,"8,000.00","20,000.00"')
+    summary = import_statement(pool, inst, text)
+    assert summary["statement"]["credits_missing"] == [
+        {"line": 3, "utr": "unparsed-line-3", "amount": "8000.00"}]
+    assert summary["statement"]["credits_dropped"] == "8000.00"
+
+
+def test_a_statement_with_no_balance_column_is_counted_not_assumed_complete(pool, conn, inst):
+    text = "Txn Date,Narration,Deposit Amt\n01/06/2026,UPI/CR/615412345601/A/SBIN/a.b@oksbi/fees,2000\n"
+    assert import_statement(pool, inst, text)["statement"]["continuity"] == "no_balance"
+    close = run_close(conn, inst, date(2026, 6, 20))
+    # Its one credit line did land, so nothing is missing and the close is clean,
+    # but the count says one file could not be checked for completeness.
+    assert close["status"] == "clean" and close["statements_without_balances"] == 1

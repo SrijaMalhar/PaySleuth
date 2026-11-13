@@ -122,15 +122,18 @@ unchanged, and no money record is ever lost. A partial unique index lets a payme
 **Noticing when data is missing, not just when it is wrong.** Three checks, each catching what the
 others cannot:
 
-- *Within a statement.* Banks print a running balance, so every line's balance must equal the previous
-  plus its credit minus its debit. An unreadable or altered line breaks the chain, and the alert names
-  the line and the unaccounted amount.
+- *Within a statement.* Where the export carries a running balance, every line's balance must equal
+  the previous plus its credit minus its debit. An altered or dropped line breaks the chain, and the
+  alert names the line and the unaccounted amount. Exports without a balance column cannot be checked
+  this way, so the daily close counts them rather than implying the files were verified.
 - *Between statements.* Each file's opening balance must equal the previous file's closing balance for
   that account, or a page or a day is missing.
 - *Into the books.* Every distinct (UTR, amount) the statement printed must have a `bank_credits` row
   with that UTR and that amount. This one asks the database rather than trusting the importer's report,
   so a line lost to a narration the parser could not read, a UTR it rejected, a UTR that came back with
-  a different amount, or a bug in the import itself is all caught the same way.
+  a different amount, or a bug in the import itself is all caught the same way. A line whose own amount
+  could not be read has no size to report, and is named with its line number anyway: that is the one
+  case the balance check can also miss, when the line is a short file's first.
 
 The daily close then checks the other direction: every rupee that did land is applied to a bill, held
 as an advance, waiting for review, or returned, and no more has been applied than was received. A
@@ -268,6 +271,9 @@ Putting any of these back fails a test by name:
 - The daily close summing only the credits that landed, so a statement line that never became a row was
   absent from both sides of the arithmetic and the close reported "clean". Found by auditing this
   README against the code: the claim was written before the check existed.
+- A credit line whose own amount could not be read going unreported, because it leaves no ledger row for
+  the balance check and has no amount for the landed check. Found by probing the fix above with a file
+  whose first line was unreadable.
 
 ## Benchmarks
 

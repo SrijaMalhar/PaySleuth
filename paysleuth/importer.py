@@ -204,13 +204,21 @@ def import_statement(pool, inst: int, text: str, *, workers: int = 8, account: s
 
     if not statement["already_imported"]:
         # Ask the books whether every credit line the statement printed is there.
-        # A line the parser could not read never became a Credit, so its rupees
-        # are taken from the parsed ledger rows; a line whose amount itself was
-        # unreadable shows up instead as a break in the running balance.
-        unreadable = [UnparsedCredit(utr=f"line-{error['line']}", amount=row.credit, line=row.line)
-                      for row in parsed.rows if row.credit > 0
-                      for error in parsed.errors if error["line"] == row.line]
+        #
+        # A line the parser rejected never became a Credit, so it is passed in
+        # with the amount the ledger row shows and a UTR that cannot exist, which
+        # makes the check report it as missing. A line whose amount itself could
+        # not be read has no ledger row either, so its line number goes in
+        # separately and it is reported with no amount.
+        amount_on_line = {row.line: row.credit for row in parsed.rows if row.credit > 0}
+        rejected, unreadable = [], []
+        for error in parsed.errors:
+            if error["line"] in amount_on_line:
+                rejected.append(UnparsedCredit(utr=f"unparsed-line-{error['line']}",
+                                               amount=amount_on_line[error["line"]], line=error["line"]))
+            else:
+                unreadable.append(error["line"])
         with pool.connection() as conn:
             statement.update(check_credits_landed(conn, inst, statement["id"],
-                                                  list(parsed.credits) + unreadable))
+                                                  list(parsed.credits) + rejected, unreadable))
     return {**summary, "bank": parsed.bank, "statement": statement}

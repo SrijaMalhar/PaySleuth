@@ -71,7 +71,7 @@ def record_statement(conn, inst: int, text: str, check: Continuity, line_count: 
         return _statement_view(row, already_imported=False, gap=gap)
 
 
-def check_credits_landed(conn, inst: int, statement_id: int, credits) -> dict:
+def check_credits_landed(conn, inst: int, statement_id: int, credits, unreadable_lines=()) -> dict:
     """Check every credit line in a statement against the books, and alert on any that is missing.
 
     The rule: each distinct (UTR, amount) the statement printed must have a
@@ -84,6 +84,9 @@ def check_credits_landed(conn, inst: int, statement_id: int, credits) -> dict:
     amount, or a bug in the import itself. A line the bank printed twice is one
     (UTR, amount) pair, so a reprint is neither counted twice nor called
     missing.
+
+    unreadable_lines are lines whose own amount could not be parsed, so their
+    size is unknown; they are reported as missing with no amount.
     """
     printed = {}
     for credit in credits:
@@ -101,17 +104,30 @@ def check_credits_landed(conn, inst: int, statement_id: int, credits) -> dict:
             else:
                 dropped += amount
                 missing.append({"line": line, "utr": utr, "amount": to_rupees(amount)})
+        # A line whose own amount could not be read is money of unknown size. It
+        # has to be named anyway: if it is the only unreadable line in a short
+        # file, or the file's first line, the running-balance check cannot see it
+        # either, and saying nothing would be the one outcome that loses money
+        # silently.
+        for line in sorted(unreadable_lines or ()):
+            missing.append({"line": line, "utr": None, "amount": None})
         row = conn.execute(
             "UPDATE statement_imports SET credits_recorded = %s, credits_dropped = %s "
             "WHERE id = %s RETURNING id, total_credits", (recorded_total, dropped, statement_id)).fetchone()
         if row is None:
             raise NotFound(f"statement {statement_id} not found")
         if missing:
+            unknown = sum(1 for m in missing if m["amount"] is None)
+            parts = []
+            if dropped:
+                parts.append(f"Rs {to_rupees(dropped)}")
+            if unknown:
+                parts.append(f"{unknown} line(s) whose amount could not be read")
             raise_alert(conn, inst, "credits_missing",
-                        f"Statement {statement_id}: Rs {to_rupees(dropped)} it credits is not in the "
-                        f"books ({len(missing)} line(s), first at line {missing[0]['line']})",
+                        f"Statement {statement_id}: {len(missing)} credit line(s) are not in the books "
+                        f"({' and '.join(parts)}), first at line {missing[0]['line']}",
                         f"statement:{statement_id}:missing", statement_id=statement_id,
-                        dropped=to_rupees(dropped), missing=missing[:20])
+                        dropped=to_rupees(dropped), unreadable=unknown, missing=missing[:20])
     return {"credits_recorded": to_rupees(recorded_total), "credits_dropped": to_rupees(dropped),
             "credits_missing": missing[:20]}
 
@@ -151,7 +167,8 @@ def run_close(conn, inst: int, day: date) -> dict:
                  (SELECT COUNT(*) FROM bank_credits)                                                AS credits,
                  (SELECT COUNT(*) FROM alerts WHERE status = 'open'
                      AND kind IN ('statement_broken', 'statement_gap', 'credits_missing'))        AS statement_alerts,
-                 COALESCE((SELECT SUM(credits_dropped) FROM statement_imports), 0)                  AS dropped
+                 COALESCE((SELECT SUM(credits_dropped) FROM statement_imports), 0)                  AS dropped,
+                 (SELECT COUNT(*) FROM statement_imports WHERE continuity = 'no_balance')           AS unbalanceable
             """).fetchone()
         # paid is every live payment; applied is what those payments have been put
         # against charges. The difference is money held for a member, not yet owed.
@@ -179,6 +196,10 @@ def run_close(conn, inst: int, day: date) -> dict:
             "unexplained": to_rupees(unexplained),
             "books_balance": unexplained == 0 and advance >= 0,
             "every_statement_line_imported": f["dropped"] == 0,
+            # Statements whose export carried no running balance: their credit lines
+            # are still checked against the books, but nothing can confirm the file
+            # is complete, so say how many there are rather than implying otherwise.
+            "statements_without_balances": f["unbalanceable"],
             "statements_complete": f["statement_alerts"] == 0,
             "open_statement_alerts": f["statement_alerts"],
             "mismatched_credits": [{"id": m["id"], "utr": m["utr"], "status": m["status"],

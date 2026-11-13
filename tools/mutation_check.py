@@ -93,7 +93,7 @@ MUTATIONS = [
              "tests/test_webhooks.py::test_an_old_message_sent_again_is_refused"),
     Mutation("statement lines not checked against the books", "paysleuth/importer.py",
              (("            statement.update(check_credits_landed(conn, inst, statement[\"id\"],\n"
-               "                                                  list(parsed.credits) + unreadable))",
+               "                                                  list(parsed.credits) + rejected, unreadable))",
                "            pass"),),
              "tests/test_close.py::test_a_credit_line_that_cannot_be_imported_is_reported_as_missing"),
     Mutation("generic parser keeps a masked UPI ID", "paysleuth/statements.py",
