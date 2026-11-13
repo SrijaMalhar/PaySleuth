@@ -9,8 +9,8 @@ money and never touches a payment network.
 
 The CRUD here is an afternoon's work. The design problem is that the input is partial, repeated and
 adversarially messy, the output is **money attributed to a named family**, and **a wrong attribution is
-worse than no attribution** — the right family gets a reminder they do not deserve and the wrong one
-stops paying. Three real statement lines, and what each one costs:
+worse than no attribution** — the family that paid gets a reminder they do not deserve, and the family
+that did not stops paying. Three real statement lines, and what each one costs:
 
 ```
 UPI-R K VERMA-rk.verma@okhdfcbank-HDFC0001234-615412345602-JUNE FEES
@@ -26,30 +26,35 @@ BY TRANSFER-UPI/CR/615412345601/SUNITA S/SBIN/sunita.sha/June fees--
 So: no stored balances, append-only money, one lock order, seven idempotency keys, and a system built to
 refuse rather than guess.
 
-### What is actually proven, not claimed
+## It runs
+
+`python -m tools.walkthrough` — billing, an import that decides what it can and refuses what it cannot,
+the queue a person works, one credit delivered twenty times at once, and a statement line that never
+became a row. Real output, against a real PostgreSQL, into a throwaway schema.
+
+![A recorded run of tools/walkthrough.py](docs/walkthrough.gif)
+
+The last beat is the one to watch. The bank printed ₹12,000, nothing in the books corresponds to it, and
+summing what landed would have balanced perfectly — because a lost line is absent from *both* sides of
+the arithmetic. Catching that needs a third question, asked of the database rather than of the importer.
+
+### What is proven, not claimed
 
 | | |
 |---|---|
-| **345 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **347 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
 | **22/22 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
 | **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
-| **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence is tested at 1, 4, 8 and 16 workers |
+| **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence tested at 1, 4, 8 and 16 workers |
 | **12 bugs, listed by name** | including the one where a feature's headline claim in this README was false |
 | **10 layers, asserted** | `test_architecture.py` reads the AST import graph: acyclic, pure layer closed, HTTP confined to one module |
 
-**If you have five minutes**, read [the locking protocol](#concurrency-the-locking-protocol),
-[seven idempotency keys](#idempotency-seven-keys-for-seven-questions), and
-[the bug where the feature's own claim was false](#bugs-these-layers-caught-and-how).
-
 Python 3.12 · FastAPI · PostgreSQL 16 · psycopg 3 · no ORM · 4,300 lines of application code, a 320-line
-schema, 4,200 lines of tests
+schema, 4,200 lines of tests.
 
-**Contents** · [The design problem](#the-design-problem) · [Domain model](#domain-model) ·
-[Invariants](#invariants-and-where-they-live) · [State machines](#state-machines) ·
-[Concurrency](#concurrency-the-locking-protocol) · [Idempotency](#idempotency-seven-keys-for-seven-questions) ·
-[Module structure](#module-structure) · [Extension points](#extension-points) ·
-[Patterns](#patterns-used-and-patterns-refused) · [Proving it](#how-correctness-is-established) ·
-[Trade-offs](#trade-offs-and-what-i-would-change-at-ten-times-the-size) · [Running it](#running-it)
+**Deeper than this page goes:** [concurrency](docs/concurrency.md) ·
+[how correctness is established](docs/correctness.md) ·
+[parallel import equivalence](docs/parallel-import.md) · [running a pilot and deploying](docs/deploying.md)
 
 ---
 
@@ -64,11 +69,9 @@ Four properties of the input drive every decision in this codebase:
 | The payer identifies themselves inconsistently or not at all | Matching needs tiers of confidence, and an explicit "a person must decide" state |
 | Lines go missing, repeat, or arrive out of order | The system has to detect absence, which is harder than detecting error |
 
-And one constraint on the output that the asymmetry above imposes: every automatic decision has to be
+And one constraint the asymmetry above imposes on the output: every automatic decision has to be
 explainable in one sentence to a tuition centre owner. That rules out a model, and it is why the five
 rules that spend money without a human are a closed ordered list rather than a plugin registry.
-
----
 
 ## Domain model
 
@@ -107,30 +110,25 @@ credit      = SUM(payments.amount) - SUM(allocations.amount)
 
 A stored balance is a cache of a sum, and every cache needs invalidation. Under concurrent writes —
 twenty copies of one bank alert, a billing run and a payment at the same instant, a correction moving
-money between two families — an incremented counter is where the bug lives. Deriving the number means
-a lost update can corrupt *a row*, but it cannot corrupt *the answer*: the sum is recomputed from rows
-that are themselves constrained.
+money between two families — an incremented counter is where the bug lives. Deriving the number means a
+lost update can corrupt *a row*, but it cannot corrupt *the answer*: the sum is recomputed from rows that
+are themselves constrained.
 
-What this costs: every balance read is an aggregate. The mitigation is that the aggregate is cheap at
-this scale (a few thousand rows per institution per month), indexed for it, and never done in a loop —
-`settle_members()` and `balances_with_details()` take a list of members and answer in one query each.
-`tests/test_performance.py` holds the query count per credit to a constant so a per-member loop cannot
-creep back in.
+What it costs: every balance read is an aggregate. The mitigation is that the aggregate is cheap at this
+scale, indexed for it, and never done in a loop — `settle_members()` and `balances_with_details()` take a
+list of members and answer in one query each. `tests/test_performance.py` holds the query count per
+credit to a constant so a per-member loop cannot creep back in.
 
-### Money is integer paise, end to end
+### Money is integer paise, and months are strings
 
-Parsed once with `Decimal` at the edge, stored as `bigint`, formatted back to a rupee string at the
-edge. No float ever touches an amount, because `int(0.29 * 100)` is 28. Three decimal places are
-*refused*, not rounded — a fraction of a paisa is bad input, not an amount. Amounts cross the API as
-strings (`"2000.50"`), never JSON numbers, because many clients parse those as floats.
-
-### Billing months are strings
+Amounts are parsed once with `Decimal` at the edge, stored as `bigint`, and formatted back to a rupee
+string at the edge. No float ever touches an amount, because `int(0.29 * 100)` is 28. Three decimal
+places are *refused*, not rounded — a fraction of a paisa is bad input, not an amount. Amounts cross the
+API as strings (`"2000.50"`), never JSON numbers, because many clients parse those as floats.
 
 A billing month is `"2026-06"`, not a date. Zero-padded, so `"2026-09" < "2026-10"` is a plain string
-comparison and PostgreSQL can index and `GROUP BY` it directly. A `CHECK` regex keeps the column
-honest. `due_date` is derived, and clamps: billing day 31 in February becomes the 28th or 29th.
-
----
+comparison and PostgreSQL can index and `GROUP BY` it directly. A `CHECK` regex keeps the column honest.
+`due_date` is derived, and clamps: billing day 31 in February becomes the 28th or 29th.
 
 ## Invariants, and where they live
 
@@ -151,33 +149,22 @@ that decides what a bug can do.
 | Nobody holds unused money while owing | Code, same place | Same |
 | Every credit a statement printed is in the books | `close.check_credits_landed`, which queries the books | Spans a file and a table; cannot be a constraint |
 
-Everything a constraint *can* express is a constraint. The three that cannot are the three the
-Hypothesis property test re-checks after every single operation.
+Everything a constraint *can* express is a constraint. The three that cannot are the three the Hypothesis
+property test re-checks after every single operation.
 
-The tenancy mechanism is worth a note. Every tenant query runs inside:
-
-```python
-with tenant_tx(conn, institution_id):          # SET LOCAL app.institution_id
-    ...                                        # the policy filters every table
-```
-
-`set_config(..., true)` makes it **transaction-local**, so it cannot leak to the next request that
-borrows the same pooled connection. With nothing set, the policy matches no rows — it fails closed, not
-open. And `check_role()` refuses to start as a role with `SUPERUSER` or `BYPASSRLS`, because either
-would silently skip every policy.
-
-Two tables are deliberately outside it: `institutions` and `staff`, because an API key must be looked
-up *before* the institution it belongs to is known. Those two are isolated by an explicit
-`WHERE institution_id = %s` on every query, which is weaker — a missing clause there is a bug, not a
-no-op — and is exactly why nothing else is written that way.
-
----
+The tenancy mechanism is worth a note. Every tenant query runs inside `tenant_tx(conn, institution_id)`,
+which does `SET LOCAL app.institution_id` via `set_config(..., true)` — **transaction-local**, so it
+cannot leak to the next request that borrows the same pooled connection. With nothing set, the policy
+matches no rows: it fails closed, not open. And `check_role()` refuses to start as a role with
+`SUPERUSER` or `BYPASSRLS`, because either would silently skip every policy. Two tables are deliberately
+outside it — `institutions` and `staff`, because an API key must be looked up *before* the institution it
+belongs to is known. Those two are isolated by an explicit `WHERE institution_id = %s` on every query,
+which is weaker (a missing clause there is a bug, not a no-op) and is exactly why nothing else is written
+that way.
 
 ## State machines
 
-Four, each with its transitions in one place.
-
-**A bank credit.** The only state that matters to money.
+**A bank credit** is the only state that matters to money.
 
 ```
                   rules decide
@@ -192,97 +179,46 @@ Four, each with its transitions in one place.
 `needs_review` is a first-class state, not an error state. It is where the design's refusal to guess
 becomes visible, and the only state a human can act on.
 
-**An outbox message.** This is the delivery contract, so the states carry the guarantees.
+**An outbox message** carries the delivery contract in its states.
 
 ```
 pending ──claim (FOR UPDATE SKIP LOCKED)──> sending ──┬──> sent
    ▲                                          │       ├──> skipped   (no longer needed at send time)
-   │ claim older than 60s, or send failed      │       └──> dead      (12 attempts, ~2h25m)
+   │ claim older than 60s, or send failed     │       └──> dead      (12 attempts, ~2h25m)
    └──────────────────────────────────────────┘
 ```
 
-**An approval request.** `pending -> approved | rejected`, decided by someone other than the requester,
+**An approval request** is `pending -> approved | rejected`, decided by someone other than the requester,
 with `CHECK ((status = 'pending') = (decided_by IS NULL))` so there is no half-decided row.
 
 **A charge's payment state** is *derived*, not stored: `unpaid`, `partially_paid`, `paid` are read from
-`amount` against `SUM(allocations)`. The same reasoning as balances — a state column would be a cache.
+`amount` against `SUM(allocations)`. Same reasoning as balances — a state column would be a cache.
 
----
+## Concurrency: one lock order
 
-## Concurrency: the locking protocol
+Every money operation takes locks in the same order: the `approval_requests` row, then the
+`bank_credits` row, then member rows **in ascending id order**.
 
-This is the part I would most want to be asked about. Every money operation follows one order:
-
-```
-1. the approval_requests row     (maker-checker actions)        SELECT ... FOR UPDATE
-2. the bank_credits row          (anything a person does to an existing credit)
-3. member rows                   ALWAYS in ascending id order   SELECT ... WHERE id = ANY(...) ORDER BY id FOR UPDATE
-```
-
-**Ascending id order is the whole deadlock argument.** If every transaction takes the lower id first,
-no transaction can hold B while waiting for A, so a wait cycle cannot form. The alternative — locking
-"from, then to" when moving money — deadlocks the moment one clerk moves money from Diya to Kabir while
-another moves different money from Kabir to Diya. `lock_members()` is the only place that takes a member
-lock, and it sorts; there is no second path to get it wrong.
+**Ascending id order is the whole deadlock argument.** If every transaction takes the lower id first, no
+transaction can hold B while waiting for A, so a wait cycle cannot form. The alternative — locking "from,
+then to" when moving money — deadlocks the moment one clerk moves money from Diya to Kabir while another
+moves different money from Kabir to Diya. `lock_members()` is the only place that takes a member lock,
+and it sorts; there is no second path to get it wrong.
 
 A second ordering decision: **decide while holding the locks, then write.** A sibling split divides by
-what each child owes *right now*, so the candidate members are locked, then the rules run, then the
-credit row is inserted with the status it ends up in. Deciding before locking would mean splitting on
-figures that could change before the write landed.
+what each child owes *right now*, so the candidate members are locked, then the rules run, then the credit
+row is inserted with the status it ends up in.
 
-| Race | Without protection | Mechanism | Test |
-|---|---|---|---|
-| One bank alert delivered 20× at once | Paid 20 times | `UNIQUE` on UTR + `ON CONFLICT DO NOTHING` | `test_the_same_transfer_arriving_20_times_at_once_counts_once` |
-| 20 payments for one member at once | A fee paid twice | Member row lock | `test_20_payments_for_one_member_at_once_never_pay_a_fee_twice` |
-| Opposite reassignments | **Deadlock** | Ascending id order | `test_opposite_reassignments_at_once_never_deadlock` |
-| Two clerks resolve one queued credit | Applied twice | Credit row lock | `test_two_people_resolving_the_same_credit_differently` |
-| Two owners approve one correction | Reassigned twice | Approval row lock | `test_two_approvers_at_once_apply_it_once` |
-| Late-fee job vs a payment landing | Fee charged to someone who just paid | Check, lock, **re-check** | `test_late_fee_is_rechecked_after_waiting_for_the_lock` |
-| Two people editing one member | Lost update | `version` column, surfaced as an ETag → 412 | `test_ten_people_saving_the_same_member_at_once` |
-| Many relay workers | Double send | `FOR UPDATE SKIP LOCKED` | `test_many_workers_deliver_every_message_exactly_once` |
-| API and workers starting together | `CREATE POLICY` fails | `pg_advisory_xact_lock` around migration | `test_processes_starting_together_can_all_migrate` |
-
-The late-fee test is the one I would point at. Checking before locking is a classic time-of-check bug,
-and an ordinary test cannot force the bad interleaving. That test polls `pg_stat_activity` until the job
-is observably blocked on the member lock, *then* lands the payment — so the worst order happens on every
-run, not occasionally.
-
-### Parallel import that is equivalent to serial import
-
-Random threads would keep the books valid — every write takes member locks — but not **deterministic**.
-Two of one member's payments racing means a different allocation split, so the same upload could text a
-parent two different things. Non-determinism in a money system is a defect even when every row is legal.
-
-The rule: **parallel across members, in statement order within a member.** Credits are grouped with a
-disjoint set (union-find, path halving and union by size) over two kinds of node — a credit's UTR, and
-each member it could belong to:
-
-```
-  Rs 3,500 from rk.verma@okhdfcbank ──┬── ("member", 41)  Rohan
-                                      └── ("member", 42)  Kabir
-  Rs 1,500 "PS1042" ────────────────────────┘                 same group: shares Kabir
-  Rs 2,000 "PS1055" ───── ("member", 55)  Diya                separate group
-```
-
-Groups cannot affect each other by construction, so each runs in statement order on one connection and
-they run concurrently. Union-find fits because the joins arrive one credit at a time and the only
-question is ever "are these two already connected?".
-
-The grouping is a **determinism layer, not the safety layer**. If it were wrong tomorrow the books would
-still be valid, because the locks are untouched; the result would merely depend on timing. Keeping those
-jobs separate means a bug in the fast path cannot lose money, only reproducibility.
-
-It is proved, not asserted: the same statement is imported line-by-line into one schema and in parallel
-into another, at 1, 4, 8 and 16 workers, and the books are compared by UTR and reference code rather
-than row id. [docs/parallel-import.md](docs/parallel-import.md) has the full argument and the bug this
-caught.
-
----
+Nine races have a test each, and where an interleaving matters it is forced rather than hoped for — the
+late-fee test polls `pg_stat_activity` until the job is observably blocked on the member lock, *then*
+lands the payment, so the worst order happens on every run. Parallel import is grouped by a union-find
+over (UTR, member) nodes so that it is not merely safe but **deterministic**: the same upload must text a
+parent the same thing twice. → [docs/concurrency.md](docs/concurrency.md)
 
 ## Idempotency: seven keys for seven questions
 
-"Make it idempotent" is not one decision. Each repeated action has its own natural key, and choosing
-the wrong one is how a system double-charges.
+"Make it idempotent" is not one decision. Each repeated action has its own natural key, and choosing the
+wrong one is how a system double-charges.
 
 | Repeated action | Key | Whose key is it |
 |---|---|---|
@@ -294,13 +230,11 @@ the wrong one is how a system double-charges.
 | A member edit is submitted twice | `version`, as an HTTP ETag | Optimistic locking: the second gets 412, not a silent overwrite |
 | A correction is applied twice | `payments.reverses_id` unique | Money can be taken back once |
 
-Two details worth defending. First, `record_credit` does a cheap `SELECT` before the `INSERT`, but
-**that lookup is not the guarantee** — two requests can both see "no row". The unique constraint is the
-guarantee; the lookup only saves the work of locking members for the common re-import case. Second, the
-same UTR arriving with a *different amount* is not idempotent and not an error to swallow: it is a 409
-for a person to look at.
-
----
+Two details worth defending. `record_credit` does a cheap `SELECT` before the `INSERT`, but **that lookup
+is not the guarantee** — two requests can both see "no row". The unique constraint is the guarantee; the
+lookup only saves the work of locking members for the common re-import case. And the same UTR arriving
+with a *different amount* is not idempotent and not an error to swallow: it is a 409 for a person to look
+at.
 
 ## Module structure
 
@@ -320,49 +254,33 @@ ones, never the reverse.**
  money, periods, names, errors, actors, webhooks, allocation, banks.common
 ```
 
-Three rules hold this shape, and `tests/test_architecture.py` reads the import graph out of the source
-and asserts each one, because a layering that exists only in a README stops being true on the first busy
+Three rules hold this shape, and `tests/test_architecture.py` reads the import graph out of the source and
+asserts each one, because a layering that exists only in a README stops being true on the first busy
 afternoon:
 
 1. **No cycles.** Every module is understandable, and testable, without its callers.
 2. **The pure layer is closed.** Money, time, name matching, statement parsing and the bank adapters
    depend only on each other — never on the database. So a statement can be parsed and balance-checked
-   with no connection, no institution and no fixtures. (The chain is legitimately five deep:
-   `banks.common` → each adapter → `banks` → `statements` → `continuity`.)
+   with no connection, no institution and no fixtures.
 3. **HTTP lives only in `api.py`.** Business code raises `NotFound`, `Conflict`, `PreconditionFailed`,
    `Forbidden`; `api.py` maps them to 404, 409, 412, 403 in one place. A test asserts no module outside
    `api.py` raises `HTTPException`. That is what lets the worker, the CLI and the tests call the same
    functions with no request in sight.
 
-`allocation.py` sits in the bottom layer although it writes SQL: it takes the connection as a parameter
-and imports no module of the package, so nothing it does is decided by what is above it.
-
-Behaviour that varies is injected, not imported: `create_app(dsn, send, today=…, now=…)` takes the
-message sender and the clock, which is why the API tests run against a real HTTP server with a fixed
-date and a fake gateway and no monkeypatching of modules.
-
----
+Behaviour that varies is injected, not imported: `create_app(dsn, send, today=…, now=…)` takes the message
+sender and the clock, which is why the API tests run against a real HTTP server with a fixed date and a
+fake gateway and no monkeypatching of modules.
 
 ## Extension points
 
 The LLD question is "what does it take to add one?" Each of these is one declaration.
 
-**A new bank's statement layout** — one module in `paysleuth/banks/`, exporting `NAME`, `HEADER` (the
-column names that identify the export) and `narration(text)`. Add it to the `BANKS` tuple. Nothing in
-`statements.py` changes; `banks.detect()` picks it by header, and unknown layouts fall back to the
-generic patterns.
+**A new bank's statement layout** — one module in `paysleuth/banks/` exporting `NAME`, `HEADER` and
+`narration(text)`, added to the `BANKS` tuple. Nothing in `statements.py` changes; `banks.detect()` picks
+it by header, and unknown layouts fall back to the generic patterns.
 
-```python
-NAME = "Kotak"
-HEADER = {"transactiondate", "narration", "chqrefno", "balance"}
-
-def narration(text: str) -> dict | None:
-    m = _UPI.match(text)
-    return fields("UPI", m["utr"], m["name"], m["upi"], m["note"]) if m else None
-```
-
-**A new suggestion signal** — one `Signal` entry carrying its weight, when it fires and how it reads to
-the owner, over a `Facts` object computed once per member:
+**A new suggestion signal** — one `Signal` entry carrying its weight, when it fires and how it reads to the
+owner, over a `Facts` object computed once per member:
 
 ```python
 Signal("note_says_urgent", 50,
@@ -370,29 +288,24 @@ Signal("note_says_urgent", 50,
        reason=lambda f: "the note says urgent")
 ```
 
-`WEIGHTS` is derived from the table, so the surface the tuner uses stays in step automatically.
-Mutually exclusive signals declare a `group`, so "equals the fee" cannot also score "a whole number of
-months of the fee" for the same rupees. A signal receives facts rather than a connection — which is what
-keeps the scoring pass at four queries however many signals exist. There is a test that declares a new
-signal at runtime and watches the review queue score and explain it.
+`WEIGHTS` is derived from the table, so the surface the tuner uses stays in step automatically. Mutually
+exclusive signals declare a `group`, so "equals the fee" cannot also score "a whole number of months of the
+fee" for the same rupees. A signal receives facts rather than a connection — which is what keeps the
+scoring pass at four queries however many signals exist. There is a test that declares a new signal at
+runtime and watches the review queue score and explain it.
 
-**A new message kind** — add it to the `outbox.kind` CHECK, enqueue it in the transaction that causes
-it, and the relay delivers it with the retry, ordering and quiet-hours behaviour already in place.
+**A new message kind** — add it to the `outbox.kind` CHECK and enqueue it in the transaction that causes it;
+the relay delivers it with the retry, ordering and quiet-hours behaviour already in place.
 
-**A new automatic matching rule** — one branch in `decide()`, which returns a `Decision(parts, rule)`
-value object. Adding one does not touch recording, allocation or receipts.
-
-What is deliberately *not* an extension point: the five automatic rules are a closed, ordered list
-rather than a plugin registry. They decide where money goes without a human, so I want them readable
-top to bottom on one screen and changed with intent, not discovered at import time.
-
----
+What is deliberately *not* an extension point: the five automatic rules are a closed, ordered list rather
+than a plugin registry. They decide where money goes without a human, so they should be readable top to
+bottom on one screen and changed with intent, not discovered at import time.
 
 ## Patterns used, and patterns refused
 
 | Pattern | Where | Why |
 |---|---|---|
-| Transactional outbox | `outbox.py` | A receipt row is inserted in the payment's own transaction, so a payment without its receipt is impossible. Then delivery happens outside any transaction, so a slow gateway never holds a lock |
+| Transactional outbox | `outbox.py` | A receipt row is inserted in the payment's own transaction, so a payment without its receipt is impossible. Delivery then happens outside any transaction, so a slow gateway never holds a lock |
 | Strategy, as a data table | `matching.SIGNALS`, `banks.BANKS` | Each variant is one declaration instead of a branch in three functions |
 | Value objects (frozen dataclasses) | `Credit`, `Decision`, `Facts`, `Signal`, `Bank`, `Continuity`, `StatementRow`, `Actor` | A fact from the bank should not be mutable after parsing |
 | Append-only ledger with correction rows | `payments`, `allocations` | Money history is evidence. Corrections are new rows, enforced by triggers |
@@ -400,13 +313,12 @@ top to bottom on one screen and changed with intent, not discovered at import ti
 | Pessimistic row locks | money operations | Machine writes are short and *do* conflict |
 | Claim-check queue | `FOR UPDATE SKIP LOCKED` + visibility timeout | A small queue with the properties of a real one, without another system to run |
 | Context variable for the actor | `actors.current_actor` | The audit log records who acted without every money function taking a `who` parameter it does not use |
-| Dependency injection by parameter | `create_app(dsn, send, today=…, now=…)` | Tests get a real server, a fixed clock and a fake gateway with no patching |
 
 Refused, with reasons I would defend:
 
 - **No ORM.** The hard parts here are `FOR UPDATE SKIP LOCKED`, `FILTER` aggregates, partial unique
-  indexes, `INSERT ... ON CONFLICT`, row-level security and CTEs. Every one of those is something I would
-  be fighting an ORM to express precisely, and the mapping layer would obscure the locking, which is the
+  indexes, `INSERT ... ON CONFLICT`, row-level security and CTEs. Every one is something I would be
+  fighting an ORM to express precisely, and the mapping layer would obscure the locking, which is the
   thing I most need to reason about.
 - **No Kafka, no microservices.** A 500-student centre generates a few thousand rows a month. One
   PostgreSQL does transactional outbox, queueing, tenancy and reporting here. Choosing not to use Kafka
@@ -414,129 +326,49 @@ Refused, with reasons I would defend:
 - **No ML matching.** In money, a rule that can be explained to the owner beats a model that cannot. The
   review queue *ranks* with weights, but ranking is a suggestion shown to a person; the five automatic
   rules are deterministic and readable.
-- **No stored balances, no denormalised counters.** Covered above: every cache needs invalidation, and
-  invalidation under concurrency is where the money bug lives.
-- **No soft-delete flag on money.** `payments` and `allocations` are append-only, so a correction is a
-  new signed row rather than a hidden one.
-
----
+- **No stored balances, no denormalised counters.** Every cache needs invalidation, and invalidation
+  under concurrency is where the money bug lives.
+- **No soft-delete flag on money.** `payments` and `allocations` are append-only, so a correction is a new
+  signed row rather than a hidden one.
 
 ## How correctness is established
 
-Five layers, each catching what the one above cannot. 345 tests, none mocked — every one runs against a
-real PostgreSQL in its own schema, because locks, constraints and row-level security are the subject.
+Six layers, each catching what the one above cannot:
 
-**1. Unit and integration tests** — the cases I thought of. 19 files; `test_reports.py` is worth
-singling out, because it cross-checks every report against the others and against
-`allocation.balances()`: the ageing buckets form a partition that sums three ways, collection reconciles
-per month, each member statement agrees with the balances it came from, and a half-paisa concession still
-reconciles.
+1. **Unit and integration tests** — the cases I thought of. `test_reports.py` cross-checks every report
+   against the others and against `allocation.balances()`.
+2. **A Hypothesis state machine** — the cases I did not. It chooses the operations and re-checks every
+   invariant after **every step**. The value over a random loop is shrinking: a bug that used to fail at
+   "seed 3, step 41" now reduces to one line.
+3. **Concurrency tests** — real threads on a barrier, each on its own connection, with the bad
+   interleaving *forced*.
+4. **Equivalence testing** — parallel import against a serial baseline at four worker counts, compared by
+   business key, with the whole set of books hashed to one fingerprint.
+5. **Mutation testing** — `tools/mutation_check.py` removes one safety mechanism at a time and requires its
+   test to go red. 22/22. This is the layer that answers "do your tests actually test that?"
+6. **Architecture tests** — the import graph assertions above, so the layering is a fact rather than a
+   claim.
 
-**2. A Hypothesis state machine** — the cases I did not. `RuleBasedStateMachine` chooses the operations
-(bill, late fees, pay by code, pay from a known UPI ID, pay from a stranger, re-sent alert, assign,
-reassign with splits, bank reversal, concession change, time passing), and after **every step** the books
-must satisfy every invariant and the daily close must account for every credited rupee. The value over a
-hand-written random loop is shrinking: reintroducing the scholarship-sibling bug used to fail at "seed 3,
-step 41" and now reduces to one line.
+One mechanism is deliberately *not* mutation-tested. Swapping `hmac.compare_digest` for `==` answers
+identically for every input and leaks only timing, so no behaviour test can catch it. It is a review rule,
+not a tested one, and the code says so.
 
-```
-state.pay_from_a_known_upi_id(amount='2500', family='verma@oksbi')
-```
+→ **[docs/correctness.md](docs/correctness.md)** has all 22 mutations and the 12 real bugs these layers
+found, each named with the layer that caught it.
 
-**3. Concurrency tests** — real threads, released together on a barrier, each on its own connection, one
-per row of the table above. Where an interleaving matters, it is *forced* rather than hoped for.
+### The one I would raise myself
 
-**4. Equivalence testing** — parallel import against a serial baseline, at four worker counts, compared
-by business key. The benchmark also hashes the whole set of books into a fingerprint and prints it per
-worker count; one fingerprint across four rows is the property, and it stayed identical across the
-performance pass, which is how I knew that pass changed no result.
+The daily close's whole claim was *"PaySleuth notices when data is missing, not just when it's wrong"* —
+and it was false in exactly its own case. It summed `bank_credits`, so a statement line that never became
+a row was absent from both sides of the arithmetic: ₹12,000 of real credits vanished and the close
+reported `clean`. I had written the sentence before building the check.
 
-**5. Mutation testing** — `tools/mutation_check.py` removes one safety mechanism at a time and requires
-its test to go red. This is the layer that answers "do your tests actually test that?":
-
-```
-FOR UPDATE removed from lock_members                       caught
-members locked in request order, not id order              caught
-bank credit row lock removed                               caught
-FOR UPDATE SKIP LOCKED removed from the outbox claim       caught
-per-member outbox ordering removed                         caught
-UNIQUE (institution_id, utr) removed                       caught
-optimistic version check removed                           caught
-late-fee re-check removed                                  caught
-row-level security policy set to USING (true)              caught
-migration advisory lock removed                            caught
-union-find replaced by "first candidate"                   caught
-append-only triggers removed                               caught
-self-approval allowed                                      caught
-approval row lock removed                                  caught
-webhook timestamp not covered by the signature             caught
-webhook timestamp window removed                           caught
-statement lines not checked against the books              caught
-generic parser keeps a masked UPI ID                       caught
-reversals skipped in the parallel import                   caught
-statement check skipped when its import did not finish     caught
-a line carrying money but no readable date is dropped      caught
-printed UTR not normalised before the landed check         caught
-
-22/22 mutations caught
-```
-
-One mechanism is deliberately *not* on that list. Swapping `hmac.compare_digest` for `==` answers
-identically for every input and leaks only timing, so no behaviour test can catch it. It is a review
-rule, not a tested one, and the code says so.
-
-**6. Architecture tests** — the import graph assertions described above, so the layering is a fact rather
-than a claim.
-
-### Detecting absence, not just error
-
-This deserves its own note because it is the hardest thing in the project and the thing I got wrong
-twice. Three independent checks, each catching what the others cannot:
-
-- *Within a statement.* Where the export carries a running balance, each line's balance must equal the
-  previous plus its credit minus its debit. A dropped or altered line breaks the chain, and the alert
-  names the line and the unaccounted amount.
-- *Between statements.* Each file's opening balance must equal the previous file's closing balance for
-  that account, or a page or a day is missing.
-- *Into the books.* Every distinct (UTR, amount) the statement printed must have a `bank_credits` row
-  with that UTR and that amount. This one asks the database rather than trusting the importer's own
-  report, so a line lost to an unreadable narration, a rejected UTR, a UTR that came back with a
-  different amount, or a bug in the import itself is caught the same way.
-
-Then the daily close asks the other direction: every rupee that landed is applied to a bill, held as an
-advance, waiting for review, or returned — and no more has been applied than was received.
-
-### Bugs these layers caught, and how
-
-Each of these fails a test by name if reintroduced. I list them because "what did your tests actually
-find" is a better question than "what is your coverage".
-
-| Bug | Found by |
-|---|---|
-| A sibling on a full scholarship given a Rs 0 share of a split | Hypothesis, shrunk to one step |
-| A payment unable to return to a charge it had already part-paid, after another payment was moved away | Hypothesis |
-| Siblings paying before their first month not split, because no fee was yet in force | Hypothesis |
-| Grouping a parallel import by each credit's *first* candidate member | Serial-vs-parallel equivalence |
-| A truncated or masked UPI ID (`sunita.sha`, `**sharma@oksbi`) kept as the payer's, which then failed validation downstream and dropped the whole credit line | Reviewing the README against the code |
-| **The daily close summing only the credits that landed**, so a statement line that never became a row was absent from both sides of the arithmetic and the close reported "clean" | Reviewing the README against the code — the claim was written before the check existed |
-| A row discarded as a summary footer on the shape of its date cell alone, before anything checked whether it carried money | Probing that fix |
-| A statement whose import died partway never reconciled, and unable to be: the check was skipped on re-import and the close read a NULL as nothing-lost | Probing that fix |
-| A UTR printed lowercase reported as missing, because the check looked it up as printed while the books store it normalised | Probing that fix |
-| Exception tracebacks escaping the log masking, where both `log.exception` sites are in the money path | End-to-end review of the logging module |
-| A NUL byte in any text field, and an out-of-range date, returning 500 instead of 422 | API fuzzing |
-| `/metrics` unauthenticated, returning every institution's member count and money owed | API review |
-
-The second one is the one I would raise myself in an interview. The feature's whole claim was *"notices
-when data is missing, not just when it's wrong,"* and it was false in exactly its own case: ₹12,000 of
-real credits vanished and the close said `clean`. I had written the sentence before building the check.
-The fix asks the database instead of trusting the importer — and then three more holes turned up in the
-fix, which is why the check now has four tests and two mutation cases pointed at it.
-
----
+The fix asks the database instead of trusting the importer: every distinct (UTR, amount) the statement
+printed must have a row. Then three more holes turned up in the fix itself — a footer misread as money, a
+statement whose import died never re-checked, a UTR compared unnormalised — which is why that check now
+has four tests and two mutation cases pointed at it. It is the last beat of the walkthrough above.
 
 ## Trade-offs, and what I would change at ten times the size
-
-Decisions I would defend, with the cost stated:
 
 | Decision | Cost I accepted |
 |---|---|
@@ -549,22 +381,20 @@ Decisions I would defend, with the cost stated:
 
 At ten times the size I would keep the rule and change where it lives: partition by member id with each
 partition handled in statement order, which is the same idea with groups decided up front instead of
-discovered. What I would not change is the proof — the equivalence test keyed on business identity is
-what let me make the thing faster twice without wondering whether the books had moved.
+discovered. What I would not change is the proof — the equivalence test keyed on business identity is what
+let me make the thing faster twice without wondering whether the books had moved.
 
-What I would reach for before anything else, in order: a read replica for reports (they are the only
-unbounded reads); `NOTIFY`/`LISTEN` to wake the relay instead of a 5-second poll; and a second
-institution's real statements, because the matching weights are currently tuned against synthetic data
-and the honest number for auto-match rate is "unmeasured".
+What I would reach for first, in order: a read replica for reports (the only unbounded reads);
+`NOTIFY`/`LISTEN` to wake the relay instead of a 5-second poll; and a second institution's real
+statements, because the honest number for auto-match rate is still "unmeasured".
 
 ### Performance, measured
 
-On a 2-core x86_64 VM with PostgreSQL on the same machine. Full output in
-[bench/results/](bench/results/); the numbers are the size of a change, not precise constants.
+On a 2-core x86_64 VM with PostgreSQL on the same machine. Full output in [bench/results/](bench/results/).
 
 Queries per credit, before and after the one performance pass. The "after" column is asserted by
-`tests/test_performance.py`, so it cannot drift; the two starred figures were counted against code that
-no longer exists.
+`tests/test_performance.py`, so it cannot drift; the two starred figures were counted against code that no
+longer exists.
 
 | | before | after |
 |---|---|---|
@@ -584,14 +414,6 @@ workers  seconds  lines/s speed-up  fingerprint
 lock granularity: 8 threads x 100 transfers
   different members    520.5 transfers/s
   one member           182.9 transfers/s
-
-API latency, 8 clients, 300 members: 1689 requests, 67/s
-endpoint                              n   p50 ms   p95 ms   p99 ms
-GET /members/{id}/statement         178       64      196      239
-GET /reports/ageing                 173       59      190      254
-GET /reports/collection             157       60      219      287
-GET /review                         158      231      351      443
-POST /bank-credits                  764      114      257      332
 ```
 
 The speed-up flattens early because the machine has two cores shared with PostgreSQL. Load testing found
@@ -609,26 +431,13 @@ set the slowest request.
 docker compose up -d db
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-python -m tools.seed_demo          # a centre mid-month: billed, imported, two credits to review
+
+python -m tools.walkthrough        # the five beats in the GIF above
+python -m tools.seed_demo          # a centre mid-month, for clicking through /docs
 uvicorn paysleuth.main:app &       # API docs at http://localhost:8000/docs
-tools/demo.sh                      # or walk a month through the API from scratch
+pytest -q                          # 347 tests
+python tools/mutation_check.py     # 22 safety mechanisms, each deleted and caught
 ```
-
-Of the sample statement's five credits, three match on their own and two cannot be matched safely. Real
-output from the seeded demo's review queue:
-
-```
-Rs 2500.00 from LAKSHMI IYER: meera fees
-     75  PS1005 Meera Iyer: payer name matches Lakshmi Iyer; payer has the same surname;
-                            note mentions Meera
-Rs 12000.00 from GREEN LEAF CAFE: rent june
-     15  PS1001 Diya Sharma: amount is exactly 6 months of fees
-     15  PS1002 Rohan Verma: amount is exactly 6 months of fees
-```
-
-The first is a parent whose UPI ID nobody registered; assigning it remembers `lakshmi.iyer@oksbi`, and
-July's transfer from her matches by itself. The second is the centre's rent arriving, and the two equal
-weak suggestions are what a 15-point amount coincidence looks like — the owner leaves it alone.
 
 The five automatic rules, in order. Only these decide without a human:
 
@@ -636,97 +445,18 @@ The five automatic rules, in order. Only these decide without a human:
 2. Several codes, and the amount equals exactly what they owe together → split by what each owes.
 3. A UPI ID registered to exactly one member → that member.
 4. A UPI ID shared by siblings, and the amount equals what they owe together or their fees together →
-   split. Never a Rs 0 share, so a sibling on a full scholarship sends it to review instead.
+   split. Never a ₹0 share, so a sibling on a full scholarship goes to review instead.
 5. Anything else → the review queue, with ranked suggestions that are shown and never applied.
-
-### Running a pilot on one real institution's statement
-
-The matching weights are guesses until someone's own statement scores them, so the measuring path is a
-tool rather than a plan:
-
-```bash
-python -m tools.pilot setup  --name "Sunrise PG" --members members.csv   # sample_data/ has the template
-python -m tools.pilot import --institution 1 --statement june.csv --as-of 2026-06-30
-python -m tools.pilot review --institution 1                             # one credit at a time
-python -m tools.pilot measure --institution 1
-```
-
-`review` records, for every decision, which suggestions were on screen and where in that ranking the
-answer came — so `measure` can report what share of credits matched with nobody involved, how often the
-top suggestion was right, and each signal's precision. It refuses to tune the weights below 50 decisions
-and prints how many more are needed, because a rate over six credits is not a rate.
-
-Two rules about the data, and they are in the tool's own help. It runs against a local database that gets
-dropped afterwards, and the statement is never committed (`.gitignore` covers `*_real.csv`, `real_*.csv`
-and `pilot_data/`). And the statement is *not* anonymised first: payer names and UPI IDs are exactly what
-matching is scored on, so anonymising before measuring would measure the anonymiser. `tools/anonymise_statement.py`
-exists for the opposite job — turning a real export into a golden test fixture that can be committed.
-
-### Deploying
-
-```bash
-docker build -t paysleuth .
-docker run -e PAYSLEUTH_DATABASE_URL=... -p 8000:8000 paysleuth                  # API
-docker run -e PAYSLEUTH_DATABASE_URL=... paysleuth python -m paysleuth.worker    # worker
-```
-
-One image serves both roles, so the API and the worker cannot drift apart. Settings:
-`PAYSLEUTH_DATABASE_URL`, `PAYSLEUTH_MESSAGE_WEBHOOK`, `PAYSLEUTH_WEBHOOK_SECRET`,
-`PAYSLEUTH_METRICS_TOKEN`, `PAYSLEUTH_POOL_SIZE`, `PAYSLEUTH_LOG_LEVEL`. The schema is applied on boot
-under an advisory lock, so there is no migration step and two instances starting together cannot collide.
-
-`render.yaml` is a blueprint for the free tier, and three of its decisions are about what free tiers
-actually do rather than what they advertise:
-
-- **The database is Neon, not Render's.** A free Render Postgres expires 30 days after creation — the
-  clock starts at creation, not first use — and the data is deleted 14 days later. A demo with a fuse in
-  it is worse than no demo, so the blueprint takes a connection string instead of provisioning a database.
-- **No worker service**, because Render's free tier has none. Every job the worker runs is also an
-  idempotent endpoint, so `.github/workflows/scheduled-jobs.yml` pokes them hourly in the right order
-  (bill, remind, relay until it claims nothing, close last). Coarser than a 5-second poll, same work.
-- **`.github/workflows/keep-warm.yml`** pings `/health` every 14 minutes between 06:00 and 00:00 IST,
-  because a free service sleeps after 15 idle minutes and takes about a minute to wake. 18 hours a day is
-  roughly 540 of the 750 free instance hours a month; round the clock would be about 720 and leave no
-  margin, which is why the window is a window. It reads its own secret rather than sharing
-  `PAYSLEUTH_URL`, so a host that does not sleep gets the scheduled jobs without the pinging.
-
-`deploy/huggingface/` is the second target, for a host that asks for no card and does not sleep. A Space
-is its own git repository and takes its configuration from YAML at the top of `README.md` — which would
-put a stray table above the first line of this one, so that block lives in `deploy/huggingface/README.md`
-and `sync.sh` swaps it in while publishing. The script publishes `git archive HEAD` rather than the
-working directory, so an untracked scratch file, or a real institution's statement sitting in the folder,
-cannot reach a public Space. The one thing it needed from the image was `UID 1000`: Spaces start the
-container as that user, and files owned by anyone else become unreadable when the platform switches user.
-
-**The role the provider gives you is not the role to run as.** A managed PostgreSQL hands you an owner
-that belongs to the provider's own administrative role — `neon_superuser`, `supabase_admin` — and those
-carry `BYPASSRLS`. Connect as one and every policy in `schema.sql` is skipped with no error and no
-warning: one tenant can read another's rows. `check_role()` refuses to start as such a role, so the
-deploy fails at the first migration instead of quietly later. `docker/initdb-hosted.sql` creates the
-ordinary role to use instead — with SQL, because a role added through the provider's dashboard inherits
-that same administrative role and fails the check for the same reason. The application then creates its
-own tables and owns them, which is safe only because the schema declares `FORCE ROW LEVEL SECURITY`: a
-table's owner bypasses a merely-enabled policy whatever its role attributes say. `tests/test_deployment.py`
-asserts all 15 protected tables carry `FORCE`, since every tenancy test in the suite depends on it.
-
-One change the hosted database forced on the code. The free services put a transaction-mode pooler in
-front of PostgreSQL, which hands the next transaction a different backend — so a statement psycopg
-prepared is not there the second time it runs, and the error (`prepared statement _pg3_0 already
-exists`) appears only under load, after a query has been executed enough times to be promoted.
-`make_pool` recognises a pooled DSN and turns preparation off for it. Nothing else about the design
-minds a pooler: row-level security is set with `SET LOCAL` and the migration lock is transaction-scoped,
-so both stay on one backend for exactly as long as they need to. `tests/test_deployment.py` holds the
-detection and what it does to the connection.
 
 Outgoing messages are signed `X-PaySleuth-Signature: t=<unix>,v1=<hex HMAC-SHA256>` over
 `"<t>.<body bytes>"` — signing the timestamp *with* the body is what stops a captured message being
-replayed with a fresh `t`. The verifier lives in the same module, is tested against the signer through a
-real HTTP gateway, and can be copied into a gateway as it is. `/metrics` needs either the scrape token
-(all institutions) or a staff key (that institution only). Logs mask phone numbers and UPI IDs
-(`98****3210`, `su****@oksbi`) in a filter on the handler — including exception tracebacks — so a line
-added later anywhere is masked without the author remembering.
+replayed with a fresh `t`. `/metrics` needs either the scrape token or a staff key. Logs mask phone
+numbers and UPI IDs (`98****3210`, `su****@oksbi`) in a filter on the handler — including exception
+tracebacks — so a line added later anywhere is masked without the author remembering.
 
----
+→ **[docs/deploying.md](docs/deploying.md)** for the deploy, including the two things a managed PostgreSQL
+forces on the code: its owner role carries `BYPASSRLS`, and its pooler breaks server-side prepared
+statements.
 
 ## Limits
 
@@ -736,8 +466,8 @@ Stated plainly, because an unstated limit is a claim.
   suggestion accuracy from an institution's own recorded decisions, and `tools/tune_weights.py` tunes the
   weights against them with 5-fold cross-validation, refusing to propose anything from fewer than 50
   decisions. No real institution has used this, so there is no real-world rate to quote and none is
-  invented here. The current weights are informed guesses. `tools/pilot.py` is the path from here to a
-  measured number; until someone walks it, this bullet stands.
+  invented here. The current weights are informed guesses, and `tools/pilot.py` is the path from here to a
+  measured number.
 - **The bank adapters are written against published export layouts**, and the golden statements in
   `tests/golden/` are synthetic. Each should be re-checked against a real anonymised export before it is
   trusted; `tools/anonymise_statement.py` prepares one.
@@ -745,5 +475,7 @@ Stated plainly, because an unstated limit is a claim.
   relies on reference codes or review. A truncated ID is never stored as if it were the payer's.
 - **A change to a statement file's very first line** is visible only against the previous statement, not
   within the file. There is a test that says so.
+- **No rate limiting.** An API key can call any endpoint as fast as it likes. For a money API that is a
+  real gap, not a style choice.
 - **A single upload must fit in memory** for the grouping pass (10 MB cap at the API).
 - **No web UI.** The API and `/docs` are the interface.
