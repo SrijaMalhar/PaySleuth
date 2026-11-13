@@ -5,6 +5,7 @@ import pytest
 from paysleuth.money import to_paise, to_rupees
 from paysleuth.names import first_name, similarity, surname
 from paysleuth.periods import check_period, due_date, next_period, period_of, periods_from
+from paysleuth.statements import parse_narration, parse_statement
 
 
 # --- money ---------------------------------------------------------------------------
@@ -75,3 +76,66 @@ def test_name_matching_edge_cases():
     assert first_name("Mrs. Sunita Sharma") == "SUNITA"
     assert first_name(None) is None
     assert surname("Meera Iyer") == "IYER" and surname("Meera") is None
+
+
+# --- narrations -------------------------------------------------------------------------
+
+
+def test_slash_style_upi_narration():
+    parsed = parse_narration("UPI/CR/615412345601/SUNITA SHARMA/SBIN/sunita.sharma@oksbi/June fees")
+    assert parsed == {"channel": "UPI", "utr": "615412345601", "payer_name": "SUNITA SHARMA",
+                      "payer_upi_id": "sunita.sharma@oksbi", "note": "June fees"}
+    without_bank = parse_narration("UPI/615412345609/ANIL/anil@ybl")
+    assert without_bank["utr"] == "615412345609" and without_bank["note"] is None
+
+
+def test_hyphen_style_upi_narration_with_a_hyphen_inside_the_upi_id():
+    parsed = parse_narration("UPI-R K VERMA-rk-verma@okhdfcbank-HDFC0001234-512345678901-FEES PS1002")
+    assert parsed["payer_upi_id"] == "rk-verma@okhdfcbank"
+    assert parsed["utr"] == "512345678901"
+    assert parsed["payer_name"] == "R K VERMA" and parsed["note"] == "FEES PS1002"
+
+
+def test_neft_and_imps_narrations():
+    neft = parse_narration("NEFT-N156260012345-RAJESH KUMAR VERMA-PS1002 advance")
+    assert (neft["channel"], neft["utr"], neft["payer_name"], neft["note"]) == \
+        ("NEFT", "N156260012345", "RAJESH KUMAR VERMA", "PS1002 advance")
+    imps = parse_narration("IMPS/615412345699/PRIYA NAIR")
+    assert imps["channel"] == "IMPS" and imps["note"] is None
+    assert parse_narration("ATM CASH DEPOSIT") is None
+    assert parse_narration("   ") is None
+
+
+BANK_CSV = """Txn Date,Narration,Chq/Ref No,Withdrawal Amt,Deposit Amt,Balance
+01/06/2026,UPI/CR/615412345601/SUNITA SHARMA/SBIN/sunita.sharma@oksbi/June fees,615412345601,,"2,000.00","12,000.00"
+02/06/2026,ATM WDL MG ROAD,,500.00,,"11,500.00"
+03/06/2026 14:05,CASH DEPOSIT BY SELF,CDM00012345,,1500,"13,000.00"
+04/06/2026,UPI/CR/615412345603/MEERA/UBIN/meera@okaxis/fees,615412345603,,12.345,
+31/02/2026,UPI/CR/615412345604/ANIL/UBIN/anil@okaxis/fees,615412345604,,2000,
+05/06/2026,UPI-R K VERMA-rk.verma@okhdfcbank-HDFC0001234-615412345602-JUNE FEES,615412345602,,"3,500.00","16,500.00"
+"""
+
+
+def test_a_bank_style_csv_becomes_credits_with_bad_lines_reported():
+    result = parse_statement(BANK_CSV)
+    assert result.skipped_debits == 1
+    assert [e["line"] for e in result.errors] == [5, 6]          # bad amount, 31 February
+    assert [c.utr for c in result.credits] == ["615412345601", "CDM00012345", "615412345602"]
+    cash = result.credits[1]
+    assert cash.channel == "OTHER" and cash.amount == 150000 and cash.line == 4
+    assert cash.received_at.isoformat() == "2026-06-03T14:05:00+05:30"     # no zone given: Indian time
+    assert result.credits[2].amount == 350000 and result.credits[2].payer_name == "R K VERMA"
+
+
+def test_a_csv_without_the_needed_columns_is_refused():
+    with pytest.raises(ValueError, match="credit"):
+        parse_statement("Date,Narration,Amount\n01/06/2026,x,100\n")
+    with pytest.raises(ValueError):
+        parse_statement("")
+
+
+def test_column_names_are_matched_loosely():
+    text = ("Transaction Date,Transaction Remarks,Withdrawal Amount (INR ),Deposit Amount (INR )\n"
+            "2026-06-01,UPI/CR/615412345601/SUNITA/SBIN/s@oksbi/x,0.00,100.00\n")
+    result = parse_statement(text)
+    assert len(result.credits) == 1 and result.credits[0].amount == 10000
