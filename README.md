@@ -314,37 +314,39 @@ against code that no longer exists, and are not reproducible from the repository
 ```
 import scaling: 4675 statement lines, 500 members, 694 groups
 workers  seconds  lines/s speed-up  fingerprint
-      1     18.9      247    1.00x  1c0a9b351413
-      2     11.3      413    1.67x  1c0a9b351413
-      4     10.1      463    1.87x  1c0a9b351413
-      8     10.0      467    1.89x  1c0a9b351413
+      1     14.5      323    1.00x  39467cfe985a
+      2      9.3      502    1.55x  39467cfe985a
+      4      9.1      511    1.58x  39467cfe985a
+      8      8.4      558    1.73x  39467cfe985a
 fingerprints identical
 
 lock granularity: 8 threads x 100 transfers
-  different members    503.1 transfers/s
-  one member           164.3 transfers/s
+  different members    520.5 transfers/s
+  one member           182.9 transfers/s
 
-API latency, 8 clients, 300 members, 25s: 1567 requests, 62/s
+API latency, 8 clients, 300 members, 25s: 1689 requests, 67/s
 endpoint                              n   p50 ms   p95 ms   p99 ms
-GET /members/{id}/statement         164       56      238      314
-GET /reports/ageing                 163       91      234      289
-GET /reports/collection             145      153      333      505
-GET /review                         145      302      554      625
-POST /bank-credits                  711       82      246      374
-POST /bank-credits (split)          239       71      227      342
+GET /members/{id}/statement         178       64      196      239
+GET /reports/ageing                 173       59      190      254
+GET /reports/collection             157       60      219      287
+GET /review                         158      231      351      443
+POST /bank-credits                  764      114      257      332
+POST /bank-credits (split)          259       82      235      291
 ```
 
-That configuration matches the "before" run below, so the two are comparable. A longer run at 500
-members is in `bench/results/after.txt`; it is slower across the board, as a bigger member list makes
-every suggestion pass and every report do more work.
+That configuration matches the "before" run in `bench/results/before.txt`, so the two are comparable.
+This machine has two cores shared with PostgreSQL, so run-to-run variance is several percent: the
+figures are the size of the change, not precise constants.
 
-The speed-up flattens at 2 workers because the machine has 2 cores and shares them with PostgreSQL.
-The fingerprint is a hash of the whole set of books: it is the same for every worker count, and the
-same before and after the performance pass, so neither changed a result.
+The speed-up flattens early because the machine has two cores and shares them with PostgreSQL. The
+fingerprint is a hash of the whole set of books, and it is the same for every worker count: parallel
+import produces one result whatever the thread count. It also stayed identical across the performance
+pass, which is how I knew that pass had changed no result; its value differs from the one recorded then
+only because the comparison was later widened to cover reversals and reversal notices.
 
 Load testing found the one real performance bug: `GET /review` re-read every member, their dues, their
 fees and the payer's family for each waiting credit, giving a p50 of 2057ms and a p95 of 3976ms at 300
-members. Reading them once per page took that to 302ms and 554ms, and throughput from 26/s to 62/s.
+members. Reading them once per page took that to 231ms and 351ms, and throughput from 26/s to 67/s.
 
 ## Deploying
 

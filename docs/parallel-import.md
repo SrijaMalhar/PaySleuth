@@ -105,15 +105,15 @@ on every row of the scaling table.
 
 ```
 workers  seconds  lines/s speed-up  fingerprint
-      1     18.9      247    1.00x  1c0a9b351413
-      2     11.3      413    1.67x  1c0a9b351413
-      4     10.1      463    1.87x  1c0a9b351413
-      8     10.0      467    1.89x  1c0a9b351413
+      1     14.5      323    1.00x  39467cfe985a
+      2      9.3      502    1.55x  39467cfe985a
+      4      9.1      511    1.58x  39467cfe985a
+      8      8.4      558    1.73x  39467cfe985a
 ```
 
 One fingerprint, four worker counts. When I later rewrote the hot path to cut round trips, the
-fingerprint came out as `1c0a9b351413` again, which said in one line that a performance change had
-altered no result anywhere.
+fingerprint came out unchanged, which said in one line that a performance change had altered no result
+anywhere. Its value moved only when I widened the comparison itself to cover returned credits.
 
 ## The bug this caught
 
@@ -140,7 +140,7 @@ correct-looking answers that disagreed.
 ## What I would do differently at ten times the size
 
 At a few thousand lines a statement, grouping in memory on one machine is right, and the speed-up
-stops at the core count anyway. If a single upload were millions of lines I would keep the same rule
+stops at the core count anyway (this box has two). If a single upload were millions of lines I would keep the same rule
 and change where the grouping lives: partition by member id, with each partition's credits handled in
 statement order, which is the same idea with the groups decided up front instead of discovered.
 

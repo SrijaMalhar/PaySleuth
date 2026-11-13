@@ -1,15 +1,16 @@
 # Measured on a 2-core x86_64 cloud VM, PostgreSQL 16 on the same machine.
-# Reproduce with the commands shown under each section.
+# Re-recorded at the final commit, after the two audits. Reproduce with the
+# commands shown under each section.
 
 ## Queries and time per credit (python bench/query_count.py)
 
 case                                queries  median ms  slowest ms
-one member, by reference code            11        2.7         9.7
-two siblings, split by dues              13        3.6         8.7
-unknown payer, straight to review         4        1.0         2.7
+one member, by reference code            11        2.7         6.1
+two siblings, split by dues              13        2.9         9.1
+unknown payer, straight to review         4        0.8         1.9
 
 
-## Queries per credit, counted in the tests (python -m pytest tests/test_performance.py)
+## Queries per credit, asserted by the tests (python -m pytest tests/test_performance.py)
 
   one member, any family size        11   test_a_credit_for_one_child_costs_the_same_however_large_the_family
   six siblings, split by dues        12   test_a_sibling_split_does_not_cost_a_query_per_child
@@ -19,46 +20,39 @@ unknown payer, straight to review         4        1.0         2.7
   review queue, 25 waiting credits    6   test_the_review_queue_reads_the_members_once_not_once_per_credit
 
 ## Import scaling and lock granularity (python bench/benchmark.py)
+#
+# The fingerprint is a hash of the whole set of books. It differs from the
+# earlier recorded value (1c0a9b351413) because the comparison was widened to
+# cover credit_reversals and every message kind, and the generated statement
+# now contains returned credits. What matters is that it is the same for every
+# worker count: parallel import produces one result, whatever the thread count.
 
 machine: x86_64, 2 cores, Python 3.12.3
 
 import scaling: 4675 statement lines, 500 members, 694 groups
 workers  seconds  lines/s speed-up  fingerprint
-      1     18.9      247    1.00x  1c0a9b351413
-      2     11.3      413    1.67x  1c0a9b351413
-      4     10.1      463    1.87x  1c0a9b351413
-      8     10.0      467    1.89x  1c0a9b351413
+      1     14.5      323    1.00x  39467cfe985a
+      2      9.3      502    1.55x  39467cfe985a
+      4      9.1      511    1.58x  39467cfe985a
+      8      8.4      558    1.73x  39467cfe985a
 fingerprints identical
 
 lock granularity: 8 threads x 100 transfers
-  different members    503.1 transfers/s
-  one member           164.3 transfers/s
+  different members    520.5 transfers/s
+  one member           182.9 transfers/s
 
-## API latency, 8 clients, 300 members, 25s (python bench/load_api.py --clients 8 --seconds 25 --members 300)
+## API latency, 8 clients, 300 members, 25s
+## (python bench/load_api.py --clients 8 --seconds 25 --members 300)
 ## Same configuration as before.txt, so the two are comparable.
 
-8 clients, 300 members, 25s: 1567 requests, 62/s
+8 clients, 300 members, 25s: 1689 requests, 67/s
 
 endpoint                              n   p50 ms   p95 ms   p99 ms   max ms
-GET /members/{id}/statement         164       56      238      314      347
-GET /reports/ageing                 163       91      234      289      357
-GET /reports/collection             145      153      333      505      565
-GET /review                         145      302      554      625      633
-POST /bank-credits                  711       82      246      374      530
-POST /bank-credits (split)          239       71      227      342      378
-
-no errors
-
-## API latency, 8 clients, 500 members, 60s (python bench/load_api.py)
-
-8 clients, 500 members, 61s: 2686 requests, 44/s
-
-endpoint                              n   p50 ms   p95 ms   p99 ms   max ms
-GET /members/{id}/statement         270       57      311      427      607
-GET /reports/ageing                 269      173      408      517      656
-GET /reports/collection             272      195      548      690      837
-GET /review                         279      455      794     1126     1188
-POST /bank-credits                 1211       80      370      563     1057
-POST /bank-credits (split)          385       67      335      447      612
+GET /members/{id}/statement         178       64      196      239      275
+GET /reports/ageing                 173       59      190      254      280
+GET /reports/collection             157       60      219      287      322
+GET /review                         158      231      351      443      455
+POST /bank-credits                  764      114      257      332      425
+POST /bank-credits (split)          259       82      235      291      351
 
 no errors
