@@ -3,7 +3,7 @@
 The bugs they actually found, and how. Summarised in the
 [README](../README.md#how-correctness-is-established).
 
-Six layers, each catching what the one above cannot. 347 tests, none mocked — every one runs against a
+Six layers, each catching what the one above cannot. 358 tests, none mocked — every one runs against a
 real PostgreSQL in its own schema, because locks, constraints and row-level security are the subject.
 
 **1. Unit and integration tests** — the cases I thought of. 19 files; `test_reports.py` is worth

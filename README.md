@@ -42,7 +42,7 @@ the arithmetic. Catching that needs a third question, asked of the database rath
 
 | | |
 |---|---|
-| **347 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **358 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
 | **22/22 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
 | **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
 | **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence tested at 1, 4, 8 and 16 workers |
@@ -434,8 +434,9 @@ pip install -r requirements-dev.txt
 
 python -m tools.walkthrough        # the five beats in the GIF above
 python -m tools.seed_demo          # a centre mid-month, for clicking through /docs
+python -m tools.seed_history       # four months, 40 members, four banks' layouts
 uvicorn paysleuth.main:app &       # API docs at http://localhost:8000/docs
-pytest -q                          # 347 tests
+pytest -q                          # 358 tests
 python tools/mutation_check.py     # 22 safety mechanisms, each deleted and caught
 ```
 
