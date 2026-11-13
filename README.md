@@ -2,13 +2,47 @@
 
 [![CI](https://github.com/SrijaMalhar/PaySleuth/actions/workflows/ci.yml/badge.svg)](https://github.com/SrijaMalhar/PaySleuth/actions/workflows/ci.yml)
 
-A fee reconciliation service for tuition centres, PGs and housing societies. It reads the bank
-statement they already get, works out which member each UPI transfer is for, applies it to what they
-owe, sends receipts and reminders, and tells the owner when the statement itself is missing something.
-It never moves money and never talks to a payment network.
+Fee reconciliation for tuition centres, PGs and housing societies. It reads the bank statement they
+already get, decides which member each UPI transfer belongs to, applies it to what they owe, sends
+receipts and reminders — and tells the owner when the statement itself is missing a line. It never moves
+money and never touches a payment network.
 
-This README is about the design. Python 3.12, FastAPI, PostgreSQL 16, psycopg 3, no ORM, 4,600 lines of
-application code and 4,000 of tests.
+The CRUD here is an afternoon's work. The design problem is that the input is partial, repeated and
+adversarially messy, the output is **money attributed to a named family**, and **a wrong attribution is
+worse than no attribution** — the right family gets a reminder they do not deserve and the wrong one
+stops paying. Three real statement lines, and what each one costs:
+
+```
+UPI-R K VERMA-rk.verma@okhdfcbank-HDFC0001234-615412345602-JUNE FEES
+      one transfer, two children -> split by what each owes at that instant
+
+UPI/CR/615412345604/LAKSHMI IYER/UBIN/lakshmi.iyer@oksbi/meera fees
+      a UPI ID nobody registered -> rank it, explain it, never apply it
+
+BY TRANSFER-UPI/CR/615412345601/SUNITA S/SBIN/sunita.sha/June fees--
+      SBI truncates the name and the UPI ID -> neither may be stored as the payer's
+```
+
+So: no stored balances, append-only money, one lock order, seven idempotency keys, and a system built to
+refuse rather than guess.
+
+### What is actually proven, not claimed
+
+| | |
+|---|---|
+| **336 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **22/22 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
+| **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
+| **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence is tested at 1, 4, 8 and 16 workers |
+| **12 bugs, listed by name** | including the one where a feature's headline claim in this README was false |
+| **10 layers, asserted** | `test_architecture.py` reads the AST import graph: acyclic, pure layer closed, HTTP confined to one module |
+
+**If you have five minutes**, read [the locking protocol](#concurrency-the-locking-protocol),
+[seven idempotency keys](#idempotency-seven-keys-for-seven-questions), and
+[the bug where the feature's own claim was false](#bugs-these-layers-caught-and-how).
+
+Python 3.12 · FastAPI · PostgreSQL 16 · psycopg 3 · no ORM · 4,300 lines of application code, a 320-line
+schema, 4,200 lines of tests
 
 **Contents** · [The design problem](#the-design-problem) · [Domain model](#domain-model) ·
 [Invariants](#invariants-and-where-they-live) · [State machines](#state-machines) ·
@@ -21,18 +55,6 @@ application code and 4,000 of tests.
 
 ## The design problem
 
-The CRUD part of this is an afternoon's work: members, fees, payments, a few reports. What makes it a
-design problem is that the input is **partial, repeated and adversarially messy**, and the output is
-**money attributed to a named family**.
-
-A real statement line looks like this:
-
-```
-UPI-R K VERMA-rk.verma@okhdfcbank-HDFC0001234-615412345602-JUNE FEES        <- Rs 3,500 for two children
-UPI/CR/615412345604/LAKSHMI IYER/UBIN/lakshmi.iyer@oksbi/meera fees         <- UPI ID nobody registered
-BY TRANSFER-UPI/CR/615412345601/SUNITA S/SBIN/sunita.sha/June fees--        <- SBI truncates both names
-```
-
 Four properties of the input drive every decision in this codebase:
 
 | Property of the input | What it forces in the design |
@@ -42,10 +64,9 @@ Four properties of the input drive every decision in this codebase:
 | The payer identifies themselves inconsistently or not at all | Matching needs tiers of confidence, and an explicit "a person must decide" state |
 | Lines go missing, repeat, or arrive out of order | The system has to detect absence, which is harder than detecting error |
 
-And one property of the output: **a wrong attribution is worse than no attribution.** Marking the wrong
-family as paid means the right family gets a reminder they do not deserve and the wrong one stops
-paying. So the system is built to refuse rather than guess, and every automatic decision has to be
-explainable in one sentence to a tuition centre owner.
+And one constraint on the output that the asymmetry above imposes: every automatic decision has to be
+explainable in one sentence to a tuition centre owner. That rules out a model, and it is why the five
+rules that spend money without a human are a closed ordered list rather than a plugin registry.
 
 ---
 
