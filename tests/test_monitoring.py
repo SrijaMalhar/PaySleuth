@@ -6,7 +6,10 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from conftest import DSN, add_member, credit
+from conftest import DSN, add_member, credit, fresh_pool
+from fastapi.testclient import TestClient
+
+from paysleuth.api import create_app
 from paysleuth.alerts import list_alerts
 from paysleuth.charges import run_billing
 from paysleuth.close import run_close
@@ -19,6 +22,7 @@ from paysleuth.outbox import MAX_ATTEMPTS, relay_once
 from paysleuth.payments import record_credit
 from paysleuth.periods import IST
 from paysleuth.reminders import queue_reminders
+from paysleuth.worker import relay_all
 from tools.seed_demo import main as seed_demo
 
 NOW = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
@@ -152,14 +156,33 @@ def test_a_broken_format_string_does_not_lose_the_record():
     assert MaskPersonalData().filter(record) is True
 
 
-def test_metrics_through_the_api(api):
+def test_metrics_needs_a_token_or_a_key_and_a_key_sees_only_its_own(api):
     api.client.post("/members", json={"name": "Diya", "monthly_fee": "2000", "billing_day": 5,
                                       "start_period": "2026-06"})
-    response = api.client.get("/metrics", headers={"X-API-Key": "none"})          # no key needed
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/plain")
-    assert "paysleuth_members_active{institution=" in response.text
-    assert "# TYPE paysleuth_review_queue_depth gauge" in response.text
+    assert api.client.get("/metrics", headers={"X-API-Key": "none"}).status_code == 401
+
+    mine = api.client.get("/metrics")                       # the fixture's key
+    assert mine.status_code == 200 and mine.headers["content-type"].startswith("text/plain")
+    assert f'paysleuth_members_active{{institution="{api.inst}"}} 1' in mine.text
+    assert "# TYPE paysleuth_review_queue_depth gauge" in mine.text
+    # The other institution exists, and this key must not see it.
+    theirs = api.client.get("/metrics", headers={"X-API-Key": api.other_key}).text
+    assert theirs.count("paysleuth_members_active{") == 1
+    assert f'institution="{api.inst}"' not in theirs
+
+
+def test_a_scrape_token_sees_every_institution():
+    with fresh_pool() as pool:
+        app = create_app(DSN, lambda payload: None, pool_options=pool.options, pool_size=6,
+                         metrics_token="scrape-me")
+        with TestClient(app) as client, pool.connection() as conn:
+            for name in ("One", "Two"):
+                create_institution(conn, name)
+            assert client.get("/metrics").status_code == 401
+            assert client.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+            everything = client.get("/metrics", headers={"Authorization": "Bearer scrape-me"})
+            assert everything.status_code == 200
+            assert everything.text.count("paysleuth_members_active{") == 2
 
 
 def test_the_demo_seed_runs_and_leaves_a_believable_month(pool, capsys):
@@ -174,3 +197,44 @@ def test_the_demo_seed_runs_and_leaves_a_believable_month(pool, capsys):
     assert _values(samples, "paysleuth_members_active") == [5]
     assert _values(samples, "paysleuth_review_queue_depth") == [2]
     assert _values(samples, "paysleuth_last_close_clean") == [1]
+
+
+def test_an_exception_traceback_is_masked_too(caplog):
+    """log.exception is how a failure in the money path is recorded, and the error it
+    carries often quotes the payer. The two call sites are both in the worker."""
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    log = logging.getLogger("paysleuth.test")
+    try:
+        raise ValueError("could not match credit from sunita.sharma@oksbi phone 9876543210")
+    except ValueError:
+        log.exception("import failed for %s", "9123456780")
+    written = stream.getvalue()
+    assert "sunita.sharma@oksbi" not in written and "9876543210" not in written
+    assert "9123456780" not in written
+    assert "su****@oksbi" in written and "98****3210" in written and "91****6780" in written
+    assert "ValueError" in written and "Traceback" in written      # the traceback is still there
+
+
+def test_a_stack_trace_captured_without_an_exception_is_masked():
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    logging.getLogger("paysleuth.test").warning("slow send to 9876543210", stack_info=True)
+    written = stream.getvalue()
+    assert "9876543210" not in written and "98****3210" in written
+
+
+def test_the_worker_masks_what_it_logs_when_a_job_fails(pool, conn, inst):
+    """Not a unit of the filter: the real worker path, with a real failure."""
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    add_member(conn, inst, phone="9876543210")
+    run_billing(conn, inst, date(2026, 6, 1))
+    record_credit(conn, inst, credit(note="PS1001"))
+
+    def gateway(payload):
+        raise ConnectionError(f"gateway refused {payload['phone']} at sunita.sharma@oksbi")
+
+    relay_all(pool, gateway)
+    written = stream.getvalue()
+    assert "9876543210" not in written and "sunita.sharma@oksbi" not in written

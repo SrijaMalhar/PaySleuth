@@ -88,7 +88,8 @@ everything that matters:
 - every bank credit, by UTR, with its status and matching rule
 - every payment, keyed by UTR and reference code, never by row id
 - every allocation, keyed by UTR, reference code, period and kind
-- every queued receipt payload
+- every credit the bank returned in the same file
+- every queued message payload, receipts and reversal notices alike
 
 Keying on UTRs and reference codes rather than row ids is deliberate: serial numbers come out in a
 different order under parallel import, and an id-based comparison would fail for a reason nobody

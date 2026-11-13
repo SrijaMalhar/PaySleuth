@@ -28,6 +28,8 @@ services:
           property: connectionString
       - key: PAYSLEUTH_WEBHOOK_SECRET
         generateValue: true        # no gateway is wired up in the demo; set this if one is
+      - key: PAYSLEUTH_METRICS_TOKEN
+        generateValue: true        # /metrics needs this, or a staff key for one institution
       - key: PAYSLEUTH_POOL_SIZE
         value: "8"                 # the free database allows few connections; leave room for the worker
       - key: PAYSLEUTH_LOG_LEVEL

@@ -19,7 +19,7 @@ import re
 # A 10-digit Indian mobile number, with an optional +91 or 0 in front, a space or
 # hyphen allowed where people group the digits, and not part of a longer number.
 _PHONE = re.compile(r"(?<![\d@])(?:\+91[\s-]?|0)?([6-9]\d{4})[\s-]?(\d{5})(?!\d)")
-_UPI_ID = re.compile(r"(?<![\w.@-])([\w.-]{2,256})@([a-z][a-z0-9.]{1,63})(?![\w.])", re.IGNORECASE)
+_UPI_ID = re.compile(r"(?<![\w.@-])([\w.-]{1,256})@([a-z][a-z0-9.]{1,63})(?![\w.])", re.IGNORECASE)
 
 
 def mask_phone(number: str) -> str:
@@ -31,6 +31,8 @@ def _mask_phones(text: str) -> str:
 
 
 def _mask_upi_ids(text: str) -> str:
+    # [:2] on a one-character local part leaves that character, which is all there
+    # is; nothing is revealed that the domain did not already give away.
     return _UPI_ID.sub(lambda m: f"{m.group(1)[:2]}****@{m.group(2)}", text)
 
 
@@ -40,10 +42,12 @@ def mask(text: str) -> str:
 
 
 class MaskPersonalData(logging.Filter):
-    """Masks the formatted message and every string argument of each record.
+    """Masks the formatted message, and the traceback of an exception, on each record.
 
-    The formatted message is masked, not the format string, so an interpolated
-    phone number is caught whether it arrives as %s or inside a dict.
+    The formatted message is masked rather than the format string, so an
+    interpolated phone number is caught whether it arrives as %s or inside a
+    dict. The traceback matters as much: log.exception is how a failure in the
+    money path is recorded, and the error it carries often quotes the payer.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -55,6 +59,14 @@ class MaskPersonalData(logging.Filter):
         if masked != message:
             record.msg = masked
             record.args = ()
+        if record.exc_info or record.exc_text:
+            # Render the traceback here and mask it, so the formatter has nothing
+            # left to append unmasked.
+            text = record.exc_text or logging.Formatter().formatException(record.exc_info)
+            record.exc_text = mask(text)
+            record.exc_info = None
+        if record.stack_info:
+            record.stack_info = mask(record.stack_info)
         return True
 
 

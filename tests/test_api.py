@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 STATEMENT = """Txn Date,Narration,Chq/Ref No,Withdrawal Amt,Deposit Amt,Balance
 06/06/2026,UPI/CR/615412345601/SUNITA SHARMA/SBIN/sunita.sharma@oksbi/June fees,615412345601,,"2,000.00",
 07/06/2026,UPI-R K VERMA-rk.verma@okhdfcbank-HDFC0001234-615412345602-JUNE FEES,615412345602,,"3,500.00",
@@ -210,3 +212,65 @@ def test_daily_close_statements_and_alerts_through_the_api(api):
     assert [c["status"] for c in api.client.get("/close").json()] == ["clean"]
     assert api.client.get("/statements").json()[0]["breaks"][0]["unaccounted"] == "1800.00"
     assert api.client.post("/alerts/999/resolve").status_code == 404
+
+
+@pytest.mark.parametrize("field, value", [
+    ("name", "Diya\x00Sharma"), ("guardian_name", "Sunita\x00"), ("phone", "98765\x0043210"),
+])
+def test_a_nul_byte_in_a_member_field_is_a_422_not_a_500(api, field, value):
+    body = {"name": "Diya", "monthly_fee": "2000", "billing_day": 5, "start_period": "2026-06"}
+    assert api.client.post("/members", json={**body, field: value}).status_code == 422
+
+
+@pytest.mark.parametrize("field", ["note", "payer_name", "narration", "channel"])
+def test_a_nul_byte_in_a_credit_field_is_a_422_not_a_500(api, field):
+    body = {"utr": "615412345601", "amount": "2000", "received_at": "2026-06-10T10:00:00+05:30"}
+    assert api.client.post("/bank-credits", json={**body, field: "x\x00y"}).status_code == 422
+
+
+def test_a_binary_upload_and_a_bad_account_name_are_refused(api):
+    assert api.client.post("/bank-credits/import",
+                           files={"file": ("x.csv", "Txn Date,Narration,Deposit Amt\n\x00,x,1\n")},
+                           ).status_code == 422
+    assert api.client.post("/bank-credits/import", params={"account": "a\x00b"},
+                           files={"file": ("x.csv", "Txn Date,Narration,Deposit Amt\n")},
+                           ).status_code == 422
+
+
+@pytest.mark.parametrize("when", ["0001-01-01T00:00:00", "9999-12-31T23:59:59"])
+def test_a_date_the_database_cannot_hold_is_a_422_not_a_500(api, when):
+    assert api.client.post("/bank-credits", json={
+        "utr": "615412345601", "amount": "2000", "received_at": when}).status_code == 422
+
+
+@pytest.mark.parametrize("extra", [
+    {"payer_upi_id": "**sharma@oksbi"},                           # masked, supplied directly
+    {"payer_upi_id": "sunita.sha"},                               # cut short
+    {"payer_upi_id": "**sharma@oksbi",                            # and alongside the bank's narration
+     "narration": "UPI/CR/615412340099/SUNITA/SBIN/**sharma@oksbi/fees"},
+])
+def test_a_masked_payer_upi_id_does_not_cost_the_credit(api, extra):
+    """The money is the fact; the UPI ID is only a hint for matching.
+
+    Refusing the credit over an unusable ID is the loss the parser fix removed,
+    so the API must not reintroduce it by validating a supplied one.
+    """
+    diya = _member(api)
+    created = api.client.post("/bank-credits", json={
+        "utr": "615412300007", "amount": "2000", "received_at": "2026-06-10T10:00:00+05:30",
+        "note": diya["ref_code"], **extra})
+    assert created.status_code == 201, created.text
+    assert created.json()["credit"]["payer_upi_id"] is None
+    assert created.json()["credit"]["amount"] == "2000.00"
+
+
+def test_the_narrations_own_fields_win_over_the_callers(api):
+    """A caller who sends the bank's narration gets the bank's reading of it."""
+    diya = _member(api)
+    created = api.client.post("/bank-credits", json={
+        "utr": "615412300008", "amount": "2000", "received_at": "2026-06-10T10:00:00+05:30",
+        "note": diya["ref_code"], "payer_name": "SOMEONE",
+        "narration": "UPI/CR/615412340099/SUNITA SHARMA/SBIN/sunita@oksbi/june fees"}).json()
+    assert created["credit"]["utr"] == "615412340099"          # the narration's UTR, not the body's
+    assert created["credit"]["note"] == "june fees" and created["credit"]["payer_name"] == "SUNITA SHARMA"
+    assert created["credit"]["status"] == "needs_review"       # so the ref code no longer applies

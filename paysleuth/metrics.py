@@ -10,7 +10,7 @@ The four that matter, and why:
     review-queue age       a credit nobody has looked at is a parent not credited
     outbox lag             the oldest message still waiting; if it grows, receipts
                            and reminders are not going out
-    dead messages          delivery gave up after 8 attempts; somebody must look
+    dead messages          delivery gave up after MAX_ATTEMPTS tries; somebody must look
     open alerts            a statement is missing a page, or the books do not add up
 
 The counts are per institution, which is what an operator needs to see, and
@@ -43,10 +43,14 @@ def _seconds_since(moment: datetime | None, now: datetime) -> float | None:
     return None if moment is None else max(0.0, (now - moment).total_seconds())
 
 
-def collect(conn, now: datetime) -> list[tuple[str, dict, float]]:
-    """Every sample as (name, labels, value). One query per institution."""
+def collect(conn, now: datetime, only: int | None = None) -> list[tuple[str, dict, float]]:
+    """Every sample as (name, labels, value). One query per institution.
+
+    only limits it to one institution, for a caller holding that institution's
+    key rather than the operator's scrape token.
+    """
     samples: list[tuple[str, dict, float]] = []
-    for inst in all_institution_ids(conn):
+    for inst in ([only] if only is not None else all_institution_ids(conn)):
         tenant = {"institution": str(inst)}
         with tenant_tx(conn, inst):
             credits = conn.execute("SELECT status, COUNT(*) AS n FROM bank_credits GROUP BY status").fetchall()

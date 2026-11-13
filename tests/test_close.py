@@ -2,6 +2,9 @@
 
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from conftest import add_member, credit
 from paysleuth.alerts import list_alerts, resolve_alert
@@ -289,3 +292,65 @@ def test_a_statement_with_no_balance_column_is_counted_not_assumed_complete(pool
     # Its one credit line did land, so nothing is missing and the close is clean,
     # but the count says one file could not be checked for completeness.
     assert close["status"] == "clean" and close["statements_without_balances"] == 1
+
+
+def test_a_statement_whose_import_died_is_never_read_as_clean(pool, conn, inst):
+    """The statement row is written before the credits, so an import that dies leaves
+    it unchecked. Unchecked is not the same as nothing lost, and must not read as it."""
+    with patch("paysleuth.importer.import_credits", side_effect=RuntimeError("worker killed")):
+        with pytest.raises(RuntimeError):
+            import_statement(pool, inst, JUNE_1)
+    with tenant_tx(conn, inst):
+        assert conn.execute("SELECT credits_recorded FROM statement_imports").fetchone()[
+            "credits_recorded"] is None
+    close = run_close(conn, inst, date(2026, 6, 20))
+    assert close["statements_not_checked"] == 1 and close["every_statement_line_imported"] is False
+    assert close["status"] == "attention"
+
+    # Uploading the same file again finishes the job rather than being waved through
+    # as a duplicate, which is what used to leave it unverified for good.
+    again = import_statement(pool, inst, JUNE_1)["statement"]
+    assert again["already_imported"] is True and again["already_checked"] is False
+    assert again["credits_dropped"] == "0.00" and again["credits_recorded"] == "2000.00"
+    assert run_close(conn, inst, date(2026, 6, 20))["statements_not_checked"] == 0
+
+
+def test_a_credit_whose_date_cannot_be_read_is_still_reported(pool, conn, inst):
+    """The hole this guards: a row was called a footer on the shape of its date cell
+    alone, before anything looked at whether it carried money. In an export with no
+    balance column, a real credit disappeared with no trace at all."""
+    text = ("Txn Date,Narration,Deposit Amt\n"
+            "01/06/2026,UPI/CR/615412340001/A/SBIN/a.b@oksbi/fees,2000\n"
+            "20260601,UPI/CR/615412340002/B/SBIN/c.d@oksbi/fees,50000\n")
+    summary = import_statement(pool, inst, text)
+    assert summary["recorded"] == 1
+    assert summary["statement"]["credits_dropped"] == "50000.00"
+    [alert] = list_alerts(conn, inst)
+    assert alert["kind"] == "credits_missing" and "Rs 50000.00" in alert["message"]
+    assert run_close(conn, inst, date(2026, 6, 20))["status"] == "attention"
+
+
+def test_a_bank_summary_footer_is_still_not_mistaken_for_a_credit(pool, conn, inst):
+    """The other side of that fix: banks print numeric summaries under the table."""
+    text = (_statement(_line(1, "615412340001", "2,000.00", "12,000.00"))
+            + "STATEMENT SUMMARY :-\n"
+            + "Opening Balance,Dr Count,Cr Count,Debits,Credits,Closing Bal\n"
+            + "10000.00,0,1,0.00,2000.00,12000.00\n")
+    summary = import_statement(pool, inst, text)
+    assert summary["recorded"] == 1 and summary["statement"]["credits_dropped"] == "0.00"
+    assert summary["statement"]["continuity"] == "ok"
+    assert list_alerts(conn, inst) == []
+
+
+def test_a_utr_printed_differently_is_not_reported_as_missing(pool, conn, inst):
+    """A UTR printed lowercase or spaced is the same UTR. Looking it up as printed
+    reported money as missing that was sitting right there, and the false alarm
+    persisted, because credits_dropped is stored on the statement row."""
+    text = ("Txn Date,Narration,Chq/Ref No,Deposit Amt,Balance\n"
+            '01/06/2026,SOME ODD TRANSFER,n156260012345,"7,500.00","17,500.00"\n')
+    summary = import_statement(pool, inst, text)
+    assert summary["recorded"] == 1
+    assert summary["statement"]["credits_dropped"] == "0.00"
+    assert summary["statement"]["credits_recorded"] == "7500.00"
+    assert list_alerts(conn, inst) == []
+    assert run_close(conn, inst, date(2026, 6, 20))["status"] == "clean"

@@ -202,7 +202,7 @@ def import_statement(pool, inst: int, text: str, *, workers: int = 8, account: s
     summary = import_credits(pool, inst, parsed.credits, workers=workers, errors=parsed.errors,
                              skipped_debits=parsed.skipped_debits, reversals=parsed.reversals)
 
-    if not statement["already_imported"]:
+    if not statement["already_checked"]:
         # Ask the books whether every credit line the statement printed is there.
         #
         # A line the parser rejected never became a Credit, so it is passed in

@@ -10,7 +10,7 @@ from paysleuth.alerts import list_alerts
 from paysleuth.db import tenant_tx
 from paysleuth.institutions import create_institution
 from paysleuth.money import to_rupees
-from paysleuth.payments import record_credit
+from paysleuth.payments import record_credit, reverse_credit
 from paysleuth.statements import parse_statement
 
 
@@ -24,7 +24,11 @@ def _institution(pool, seed):
 
 
 def _serial(pool, inst, text):
-    """Line by line on one connection, in statement order."""
+    """Line by line on one connection, in statement order, then the returned credits.
+
+    The same two phases import_statement uses: every credit first, then the
+    reversals, since a line can return a credit the file reported earlier.
+    """
     parsed = parse_statement(text)
     with pool.connection() as conn:
         for credit in sorted(parsed.credits, key=lambda c: (c.received_at, c.line)):
@@ -32,6 +36,13 @@ def _serial(pool, inst, text):
                 record_credit(conn, inst, credit)
             except Exception:          # conflicts and bad lines are part of the messy statement
                 pass
+        for reversal in sorted(parsed.reversals, key=lambda r: (r.reversed_at, r.line)):
+            with tenant_tx(conn, inst):
+                found = conn.execute("SELECT id, amount FROM bank_credits WHERE utr = %s",
+                                     (reversal.utr,)).fetchone()
+            if found and found["amount"] == reversal.amount:
+                reverse_credit(conn, inst, found["id"], reason="returned by the bank",
+                               reference=reversal.narration, reversed_at=reversal.reversed_at)
 
 
 def _books(pool, inst):
@@ -51,10 +62,10 @@ def test_parallel_import_gives_exactly_the_books_of_a_serial_import(seed, worker
         summary = import_statement(parallel_pool, inst_p, text, workers=workers)
 
         assert summary["recorded"] > 40 and summary["duplicates"] > 0 and summary["conflicts"] == 1
-        assert summary["skipped_debits"] == 1
+        assert summary["skipped_debits"] == 1 and summary["reversals"] == 3
         assert summary["groups"] > 1
         serial, parallel = _books(serial_pool, inst_s), _books(parallel_pool, inst_p)
-        for part in ("credits", "payments", "allocations", "receipts"):
+        for part in ("credits", "payments", "allocations", "messages", "reversals"):
             assert parallel[part] == serial[part], f"{part} differs at {workers} workers"
 
 

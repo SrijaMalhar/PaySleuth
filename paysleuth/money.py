@@ -11,6 +11,15 @@ from decimal import Decimal
 _RUPEES = re.compile(r"^\d{1,10}(\.\d{1,2})?$")
 
 
+def check_text(value, what: str) -> str:
+    """Text on its way to the database. A NUL byte cannot be stored in a text column,
+    so it is the caller's bad input, not a server error waiting to happen."""
+    text = "" if value is None else str(value)
+    if "\x00" in text:
+        raise ValueError(f"{what} cannot contain a NUL byte")
+    return text
+
+
 def to_paise(rupees) -> int:
     """Parse a positive rupee amount into paise: "2,000.50" -> 200050.
 

@@ -10,12 +10,14 @@ JSON number, because many clients parse JSON numbers as floats.
 """
 
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse
+from psycopg.errors import DataError
 from pydantic import BaseModel, Field
 
 from . import audit
@@ -37,6 +39,7 @@ from .payments import assign_credit, get_credit, record_credit, reverse_credit, 
 from .periods import IST, period_of, today_ist, utc_now
 from .reminders import queue_reminders
 from .reports import ageing, collection_report, defaulters, statement
+from .banks.common import full_upi_id
 from .statements import Credit, parse_narration
 
 MAX_UPLOAD = 10 * 1024 * 1024
@@ -143,7 +146,7 @@ def _with_etag(view: dict, response: Response) -> dict:
 # --- the app ---------------------------------------------------------------------------
 
 def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: str | None = None,
-               pool_size: int = 20) -> FastAPI:
+               pool_size: int = 20, metrics_token: str | None = None) -> FastAPI:
     """Build the app in a function, so tests can pass a fake sender, a fixed date and a test schema."""
     pool = make_pool(dsn, max_size=pool_size, options=pool_options)
     migrate(pool)
@@ -164,7 +167,11 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return handler
 
     for error, status in ((Forbidden, 403), (NotFound, 404), (Conflict, 409), (PreconditionFailed, 412),
-                          (PreconditionRequired, 428), (ValueError, 422)):
+                          (PreconditionRequired, 428), (ValueError, 422),
+                          # Anything the database refuses as malformed input is the
+                          # caller's problem, not a server fault: a NUL byte in a
+                          # text field, a timestamp outside its range.
+                          (DataError, 422)):
         app.add_exception_handler(error, _error(status))
 
     def conn():
@@ -209,10 +216,23 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return {"status": "ok"}
 
     @app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
-    def prometheus_metrics(c=Depends(conn)):
-        """Prometheus scrape endpoint. No API key: it carries counts, no personal data,
-        and a scraper has no key. Keep it off the public internet."""
-        return render(collect(c, now()))
+    def prometheus_metrics(request: Request, c=Depends(conn),
+                           authorization: str | None = Header(None)):
+        """Prometheus scrape endpoint.
+
+        Counts are not personal data, but an institution's member count and the
+        money it is owed are its own business, so this is not open: a scraper
+        sends the token in PAYSLEUTH_METRICS_TOKEN and gets every institution,
+        and a staff API key gets that institution only.
+        """
+        if metrics_token and secrets.compare_digest((authorization or "").strip(),
+                                                    f"Bearer {metrics_token}"):
+            return render(collect(c, now()))
+        who = request.state.actor
+        if who is None:
+            raise HTTPException(status_code=401,
+                                detail="send Authorization: Bearer <metrics token> or X-API-Key")
+        return render(collect(c, now(), only=who.institution_id))
 
     # members
 
@@ -256,18 +276,28 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
 
     @app.post("/bank-credits", status_code=201)
     def add_credit(body: CreditIn, response: Response, inst=Depends(institution), c=Depends(conn)):
-        fields = {"utr": body.utr, "channel": body.channel, "payer_upi_id": body.payer_upi_id,
+        # A UPI ID that is cut short or masked is dropped rather than refused: the
+        # credit is real money and must be recorded, while the ID is only a hint
+        # for matching. Anything else malformed is still the caller's error.
+        fields = {"utr": body.utr, "channel": body.channel,
+                  "payer_upi_id": full_upi_id(body.payer_upi_id),
                   "payer_name": body.payer_name, "note": body.note}
         if body.narration:
             parsed = parse_narration(body.narration)
             if parsed is None and not body.utr:
                 raise ValueError("narration not recognised; send the utr and payer fields instead")
+            # The narration's fields win where it has them, and the caller's
+            # remaining fields stand: a caller who sends both a narration and an
+            # explicit note means the note. A masked UPI ID in either is already
+            # None by this point, so neither can reinstate one.
             fields.update({k: v for k, v in (parsed or {}).items() if v is not None})
         if not fields["utr"]:
             raise ValueError("utr is required")
         received_at = body.received_at                 # a time with no zone is Indian time
         if received_at.tzinfo is None:
             received_at = received_at.replace(tzinfo=IST)
+        if not 2 <= received_at.year <= 9998:          # leave room for the zone shift either way
+            raise ValueError("received_at must be a plausible date")
         result = record_credit(c, inst, Credit(amount=to_paise(body.amount), received_at=received_at,
                                                narration=body.narration, **fields))
         if result["duplicate"]:
@@ -276,7 +306,8 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
 
     @app.post("/bank-credits/import")
     def import_csv(file: UploadFile = File(...), workers: int = Query(8, ge=1, le=64),
-                   account: str = Query("main", max_length=40), inst=Depends(institution)):
+                   account: str = Query("main", max_length=40, pattern=r"^[A-Za-z0-9 _-]+$"),
+                   inst=Depends(institution)):
         data = file.file.read(MAX_UPLOAD + 1)
         if len(data) > MAX_UPLOAD:
             raise HTTPException(status_code=413, detail="statement is larger than 10 MB")
@@ -284,6 +315,8 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
             text = data.decode("utf-8-sig")          # utf-8-sig strips the byte-order mark Excel adds
         except UnicodeDecodeError:
             raise ValueError("statement must be a UTF-8 CSV file") from None
+        if "\x00" in text:
+            raise ValueError("statement must be a UTF-8 CSV file, not a binary file")
         # Keep connections free for other requests while the import runs.
         return import_statement(pool, inst, text, workers=min(workers, max(1, pool_size - 2)), account=account)
 

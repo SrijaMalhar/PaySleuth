@@ -10,7 +10,6 @@ Because every operation takes locks in this order, no two operations can wait
 on each other in a circle, so they cannot deadlock.
 """
 
-import re
 
 from psycopg.types.json import Jsonb
 
@@ -20,19 +19,9 @@ from .db import lock_members, tenant_tx
 from .errors import Conflict, NotFound
 from .matching import candidate_members, decide, prepare, suggest
 from .members import normalise_upi_id
-from .money import to_rupees
+from .money import check_text, to_rupees
 from .periods import IST, utc_now
-from .statements import Credit
-
-_UTR = re.compile(r"^[A-Z0-9]{6,35}$")
-
-
-def normalise_utr(utr: str) -> str:
-    value = re.sub(r"\s+", "", utr or "").upper()
-    if not _UTR.match(value):
-        raise ValueError(f"UTR must be 6-35 letters or digits (got {utr!r})")
-    return value
-
+from .statements import Credit, normalise_utr
 
 def credit_view(row: dict) -> dict:
     return {
@@ -47,6 +36,8 @@ def record_credit(conn, inst: int, credit: Credit) -> dict:
     """Record one bank credit exactly once, and apply it if a rule matches."""
     utr = normalise_utr(credit.utr)
     payer = normalise_upi_id(credit.payer_upi_id)
+    for field in ("payer_name", "note", "narration"):
+        check_text(getattr(credit, field), field)
     if credit.amount <= 0:
         raise ValueError("amount must be positive")
     as_of = credit.received_at.astimezone(IST).date()

@@ -100,6 +100,19 @@ MUTATIONS = [
              (("                    \"payer_upi_id\": full_upi_id(m[\"upi\"]), \"note\": _clean(m[\"note\"])}",
                "                    \"payer_upi_id\": m[\"upi\"].lower(), \"note\": _clean(m[\"note\"])}"),),
              "tests/test_close.py::test_a_masked_upi_id_in_an_unrecognised_layout_no_longer_loses_the_line"),
+    Mutation("reversals skipped in the parallel import", "paysleuth/importer.py",
+             (("    reversed_count = _apply_reversals(pool, inst, reversals, problems)",
+               "    reversed_count = 0"),),
+             "tests/test_import.py::test_parallel_import_gives_exactly_the_books_of_a_serial_import"),
+    Mutation("statement check skipped when its import did not finish", "paysleuth/importer.py",
+             (("    if not statement[\"already_checked\"]:", "    if not statement[\"already_imported\"]:"),),
+             "tests/test_close.py::test_a_statement_whose_import_died_is_never_read_as_clean"),
+    Mutation("a line carrying money but no readable date is dropped", "paysleuth/statements.py",
+             (("            if not (carries_money and recognised):", "            if True:"),),
+             "tests/test_close.py::test_a_credit_whose_date_cannot_be_read_is_still_reported"),
+    Mutation("printed UTR not normalised before the landed check", "paysleuth/close.py",
+             (("            utr = normalise_utr(credit.utr)", "            utr = credit.utr"),),
+             "tests/test_close.py::test_a_utr_printed_differently_is_not_reported_as_missing"),
 ]
 
 

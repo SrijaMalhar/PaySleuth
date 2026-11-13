@@ -20,6 +20,7 @@ from .continuity import Continuity
 from .db import tenant_tx
 from .errors import NotFound
 from .money import to_rupees
+from .statements import normalise_utr
 
 
 def record_statement(conn, inst: int, text: str, check: Continuity, line_count: int,
@@ -27,9 +28,14 @@ def record_statement(conn, inst: int, text: str, check: Continuity, line_count: 
     """Remember what a statement said about itself and compare it with the previous one."""
     digest = hashlib.sha256(text.encode()).hexdigest()
     with tenant_tx(conn, inst):
-        seen = conn.execute("SELECT * FROM statement_imports WHERE file_sha256 = %s", (digest,)).fetchone()
+        seen = conn.execute("SELECT * FROM statement_imports WHERE file_sha256 = %s AND account = %s",
+                            (digest, account)).fetchone()
         if seen:
-            return _statement_view(seen, already_imported=True)
+            # already_checked is False when a previous import of this file died
+            # before its credits were reconciled, so the caller knows to finish
+            # the job rather than leaving the statement unverified for good.
+            return _statement_view(seen, already_imported=True,
+                                   already_checked=seen["credits_recorded"] is not None)
 
         follows, gap = "unknown", None
         if check.status != "no_balance" and check.first_at is not None:
@@ -88,9 +94,16 @@ def check_credits_landed(conn, inst: int, statement_id: int, credits, unreadable
     unreadable_lines are lines whose own amount could not be parsed, so their
     size is unknown; they are reported as missing with no amount.
     """
+    # Normalised, because that is the form the books store: a UTR printed
+    # lowercase or with spaces is the same UTR, and looking it up as printed
+    # would report money as missing that is sitting right there.
     printed = {}
     for credit in credits:
-        printed[(credit.utr, credit.amount)] = credit.line
+        try:
+            utr = normalise_utr(credit.utr)
+        except ValueError:
+            utr = credit.utr          # cannot be stored in this form, so it is genuinely missing
+        printed[(utr, credit.amount)] = credit.line
     recorded_total, dropped, missing = 0, 0, []
     with tenant_tx(conn, inst):
         found = set()
@@ -136,8 +149,12 @@ def _money(value: int | None) -> str | None:
     return None if value is None else to_rupees(value)
 
 
-def _statement_view(row: dict, *, already_imported: bool, gap: dict | None = None) -> dict:
-    return {"id": row["id"], "already_imported": already_imported, "continuity": row["continuity"],
+def _statement_view(row: dict, *, already_imported: bool, gap: dict | None = None,
+                    already_checked: bool | None = None) -> dict:
+    if already_checked is None:
+        already_checked = row["credits_recorded"] is not None
+    return {"id": row["id"], "already_imported": already_imported,
+            "already_checked": already_checked, "continuity": row["continuity"],
             "follows": row["follows"], "opening_balance": _money(row["opening_balance"]),
             "closing_balance": _money(row["closing_balance"]),
             "total_credits": to_rupees(row["total_credits"]), "total_debits": to_rupees(row["total_debits"]),
@@ -168,7 +185,8 @@ def run_close(conn, inst: int, day: date) -> dict:
                  (SELECT COUNT(*) FROM alerts WHERE status = 'open'
                      AND kind IN ('statement_broken', 'statement_gap', 'credits_missing'))        AS statement_alerts,
                  COALESCE((SELECT SUM(credits_dropped) FROM statement_imports), 0)                  AS dropped,
-                 (SELECT COUNT(*) FROM statement_imports WHERE continuity = 'no_balance')           AS unbalanceable
+                 (SELECT COUNT(*) FROM statement_imports WHERE continuity = 'no_balance')           AS unbalanceable,
+                 (SELECT COUNT(*) FROM statement_imports WHERE credits_recorded IS NULL)            AS unchecked
             """).fetchone()
         # paid is every live payment; applied is what those payments have been put
         # against charges. The difference is money held for a member, not yet owed.
@@ -195,7 +213,11 @@ def run_close(conn, inst: int, day: date) -> dict:
             "returned_by_bank": to_rupees(f["reversed"]),
             "unexplained": to_rupees(unexplained),
             "books_balance": unexplained == 0 and advance >= 0,
-            "every_statement_line_imported": f["dropped"] == 0,
+            # An unchecked statement is one whose import did not finish, so nothing
+            # knows whether its credits landed. That is not the same as nothing
+            # being lost, and must not read as if it were.
+            "every_statement_line_imported": f["dropped"] == 0 and f["unchecked"] == 0,
+            "statements_not_checked": f["unchecked"],
             # Statements whose export carried no running balance: their credit lines
             # are still checked against the books, but nothing can confirm the file
             # is complete, so say how many there are rather than implying otherwise.

@@ -74,8 +74,10 @@ class _Lines:
         return row
 
 
-def messy_statement(families, rng, *, rounds=1, strangers=10, start=datetime(2026, 6, 1)) -> str:
-    """A shuffled statement with splits, partials, strangers, repeats, a conflict and a debit."""
+def messy_statement(families, rng, *, rounds=1, strangers=10, reversals=3,
+                    start=datetime(2026, 6, 1)) -> str:
+    """A shuffled statement with splits, partials, strangers, repeats, a conflict,
+    returned credits and a debit."""
     out = _Lines(rng, start)
     for _ in range(rounds):
         for family in families:
@@ -109,6 +111,12 @@ def messy_statement(families, rng, *, rounds=1, strangers=10, start=datetime(202
                     out.credit(fee, "SOMEONE ELSE", f"other{rng.randint(1, 10**6)}@ybl", f"{first} fees")
     for i in range(strangers):
         out.credit(rng.choice(FEES), "UNKNOWN PAYER", f"stranger{i}@ybl", "rent")
+
+    # The bank returns some of the credits it reported earlier in the same file.
+    # The reversal debit quotes the original UTR, as banks do.
+    credit_rows = [row for row in out.rows if row[4]]
+    for row in rng.sample(credit_rows, k=min(reversals, len(credit_rows))):
+        out.rows.append([out.moment(), f"UPI/REV/{row[2]}/RETURNED", row[2], row[4], "", ""])
 
     # The bank repeats some lines word for word, and one UTR comes back with a different amount.
     originals = list(out.rows)
@@ -146,8 +154,12 @@ def books(conn, inst) -> dict:
                 GROUP BY b.utr, m.ref_code, c.period, c.kind
                HAVING SUM(a.amount) <> 0
                 ORDER BY b.utr, m.ref_code, c.period, c.kind""").fetchall()
-        receipts = conn.execute(
-            """SELECT m.ref_code, o.payload - 'message_id' - 'member_id' AS payload
+        messages = conn.execute(
+            """SELECT m.ref_code, o.kind, o.payload - 'message_id' - 'member_id' AS payload
                  FROM outbox o JOIN members m ON m.id = o.member_id
-                WHERE o.kind = 'payment_receipt' ORDER BY m.ref_code, o.id""").fetchall()
-    return {"credits": credits, "payments": payments, "allocations": allocations, "receipts": receipts}
+                ORDER BY m.ref_code, o.kind, o.id""").fetchall()
+        reversals = conn.execute(
+            """SELECT b.utr, r.amount, r.reason FROM credit_reversals r
+                 JOIN bank_credits b ON b.id = r.bank_credit_id ORDER BY b.utr""").fetchall()
+    return {"credits": credits, "payments": payments, "allocations": allocations,
+            "messages": messages, "reversals": reversals}

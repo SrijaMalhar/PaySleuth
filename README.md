@@ -7,7 +7,7 @@ which member each UPI transfer is for, applies it to what they owe, sends receip
 tells the owner when the statement itself is missing something. It never moves money and never talks
 to a payment network.
 
-Python 3.12, FastAPI, PostgreSQL 16, psycopg 3, no ORM. 260 tests against a real database, and a
+Python 3.12, FastAPI, PostgreSQL 16, psycopg 3, no ORM. 299 tests against a real database, and a
 mutation check that removes each safety mechanism in turn to prove the tests would notice.
 
 ## The problem
@@ -194,14 +194,15 @@ fits on one PostgreSQL. In money, a rule that can be explained beats a model tha
 |---|---|---|
 | `test_payments.py` | 34 | Matching, idempotency, allocation, assign, split, reassign, append-only history |
 | `test_parsing.py` | 29 | Money, months, names, narrations, CSV layouts |
-| `test_close.py` | 20 | Statement continuity, gaps, missing credit lines, alerts, the daily close |
+| `test_api.py` | 28 | Keys, ETags, validation, malformed input, end-to-end flows, reports |
+| `test_close.py` | 27 | Statement continuity, gaps, missing credit lines, alerts, the daily close |
+| `test_monitoring.py` | 22 | Metrics and their access, masked logs and tracebacks, the demo seed |
 | `test_messages.py` | 19 | Outbox delivery, retries, ordering, reminders, quiet hours |
 | `test_suggestions_and_tenancy.py` | 19 | Rules, suggestion ranking, tenant isolation |
-| `test_monitoring.py` | 18 | Metrics, masked logs, the demo seed |
 | `test_webhooks.py` | 18 | Signing, verification, replay and tamper refusal |
 | `test_billing.py` | 17 | Catch-up, fee history, scholarships, late fees, optimistic locking |
 | `test_banks.py` | 15 | Golden statement per bank, masked UPI IDs, anonymiser |
-| `test_api.py` | 14 | Keys, ETags, validation, end-to-end flows, reports |
+| `test_reports.py` | 14 | Every report cross-checked against the others and against balances |
 | `test_staff.py` | 12 | Roles, audit actors, two-person approval |
 | `test_concurrency.py` | 11 | Races run for real against PostgreSQL |
 | `test_import.py` | 10 | Parallel import equals serial import, at every worker count |
@@ -248,8 +249,12 @@ webhook timestamp not covered by the signature             caught
 webhook timestamp window removed                           caught
 statement lines not checked against the books              caught
 generic parser keeps a masked UPI ID                       caught
+reversals skipped in the parallel import                   caught
+statement check skipped when its import did not finish     caught
+a line carrying money but no readable date is dropped      caught
+printed UTR not normalised before the landed check         caught
 
-18/18 mutations caught
+22/22 mutations caught
 ```
 
 One mechanism is deliberately not in that list. Swapping `hmac.compare_digest` for `==` answers
@@ -274,6 +279,21 @@ Putting any of these back fails a test by name:
 - A credit line whose own amount could not be read going unreported, because it leaves no ledger row for
   the balance check and has no amount for the landed check. Found by probing the fix above with a file
   whose first line was unreadable.
+- A row being classified as a summary footer on the shape of its date cell alone, before anything looked
+  at whether it carried money. In an export with no balance column, a real credit vanished with no trace.
+  A footer is now told apart by having neither a readable date nor a narration any parser recognises.
+- A statement whose import died partway never being reconciled, and never able to be: the statement row
+  commits before the credits, the check was skipped on re-import as a duplicate, and the close read a
+  NULL as nothing-lost. Re-uploading the file now finishes the check, and an unchecked statement keeps
+  the close out of "clean".
+- A UTR printed lowercase or with spaces being reported as missing, because the check looked it up as
+  printed while the books store it normalised. A false alarm, but a persistent one, which is how an
+  operator learns to ignore an alert.
+- A NUL byte in any text field, and a date outside PostgreSQL's range, returning 500 instead of 422.
+- A masked UPI ID supplied to `POST /bank-credits` refusing the whole credit, which is the same loss the
+  parser fix removed. The money is the fact; the ID is a hint, so it is dropped and the credit recorded.
+- Exception tracebacks escaping the log masking, which mattered because the two `log.exception` sites in
+  the system are both in the money path and the error usually quotes the payer.
 
 ## Benchmarks
 
@@ -336,8 +356,9 @@ docker run -e PAYSLEUTH_DATABASE_URL=... paysleuth python -m paysleuth.worker   
 
 One image serves both roles, so the API and the worker cannot drift apart. `render.yaml` brings up a
 free PostgreSQL, the API and the worker. Settings: `PAYSLEUTH_DATABASE_URL`,
-`PAYSLEUTH_MESSAGE_WEBHOOK`, `PAYSLEUTH_WEBHOOK_SECRET`, `PAYSLEUTH_POOL_SIZE`, `PAYSLEUTH_LOG_LEVEL`.
-`/metrics` is unauthenticated and carries counts only; keep it off the public internet.
+`PAYSLEUTH_MESSAGE_WEBHOOK`, `PAYSLEUTH_WEBHOOK_SECRET`, `PAYSLEUTH_METRICS_TOKEN`,
+`PAYSLEUTH_POOL_SIZE`, `PAYSLEUTH_LOG_LEVEL`. `/metrics` needs either that scrape token, which returns
+every institution, or a staff API key, which returns only that institution's figures.
 
 ## Limits
 

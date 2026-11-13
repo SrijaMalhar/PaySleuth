@@ -7,7 +7,7 @@ import csv
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from . import banks
 from .banks.common import full_upi_id
@@ -89,6 +89,22 @@ def parse_reversal(narration: str | None) -> str | None:
     return utrs[0] if len(utrs) == 1 else None
 
 
+_UTR = re.compile(r"^[A-Z0-9]{6,35}$")
+
+
+def normalise_utr(utr: str) -> str:
+    """The form a UTR is stored in: no whitespace, upper case.
+
+    Lives here with the rest of the parsing, so the reconciliation can look a
+    printed UTR up in the form the books hold without depending on the money
+    code.
+    """
+    value = re.sub(r"\s+", "", utr or "").upper()
+    if not _UTR.match(value):
+        raise ValueError(f"UTR must be 6-35 letters or digits (got {utr!r})")
+    return value
+
+
 def _clean(value: str | None) -> str | None:
     value = " ".join((value or "").split())
     return value or None
@@ -148,6 +164,11 @@ HEADER_SEARCH_LINES = 40
 # Something that is trying to be a date ("31/02/2026" included, so a bad date is still reported).
 _DATE_LIKE = re.compile(r"\d{1,4}[/\-. ][0-9A-Za-z]{1,9}[/\-. ]\d{2,4}")
 
+# Stands in for the moment of a money line whose date could not be read, so the
+# row still carries its amount into the continuity and landed checks. Far in the
+# past, so it sorts first and cannot be mistaken for a real statement date.
+_UNDATED = datetime(1, 1, 2, tzinfo=timezone.utc)
+
 _DATE_FORMATS = [
     "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y", "%d/%m/%y",
     "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y", "%d-%m-%y",
@@ -187,6 +208,14 @@ def _blank_amount(text: str) -> bool:
 
 def _amount_or_zero(text: str) -> int:
     return 0 if _blank_amount(text) else to_paise(text)
+
+
+def _maybe_amount(text: str | None) -> int | None:
+    """The amount in a cell, or None if the cell holds no readable amount."""
+    try:
+        return _amount_or_zero(text or "") or None
+    except ValueError:
+        return None
 
 
 def _signed_paise(text: str) -> int | None:
@@ -241,12 +270,31 @@ def parse_statement(text: str) -> ParseResult:
         if not any(cell.strip() for cell in row):
             continue
         date_text = _cell(row, columns["date"])
+        credit_text = _cell(row, columns["credit"])
+        narration = " ".join(_cell(row, columns["narration"]).split())
         if date_text and not _DATE_LIKE.search(date_text):
-            continue                  # a summary or legend line under the table, not a transaction
+            # Banks print a summary under the table whose cells are numeric, so a
+            # readable amount alone does not make a row a transaction. A real line
+            # also has a narration a parser recognises; a footer has neither that
+            # nor a readable date.
+            #
+            # A row with no readable date and no recognisable narration cannot be
+            # told apart from a footer, so it is skipped. Where the export has a
+            # balance column, the running-balance check sees the hole it leaves.
+            credit_amount = _maybe_amount(credit_text)
+            carries_money = credit_amount or _maybe_amount(_cell(row, columns.get("debit")))
+            recognised = (bank.narration(narration) if bank else None) or parse_narration(narration)
+            if not (carries_money and recognised):
+                continue
+            result.errors.append({"line": line,
+                                  "error": f"unrecognised date {date_text!r} on a line carrying money"})
+            if credit_amount:
+                result.rows.append(StatementRow(line=line, at=_UNDATED, debit=0, credit=credit_amount,
+                                                balance=None, narration=narration))
+            continue
         ledger = _ledger_row(row, columns, line)
         if ledger is not None:
             result.rows.append(ledger)
-        credit_text = _cell(row, columns["credit"])
         if _blank_amount(credit_text):
             debit_text = _cell(row, columns.get("debit"))
             if not _blank_amount(debit_text):
@@ -264,7 +312,6 @@ def parse_statement(text: str) -> ParseResult:
         try:
             amount = to_paise(credit_text)
             received_at = _parse_date(_cell(row, columns["date"]))
-            narration = " ".join(_cell(row, columns["narration"]).split())
             parsed = (bank.narration(narration) if bank else None) or parse_narration(narration)
             if parsed is None:
                 reference = re.sub(r"\s+", "", _cell(row, columns.get("reference")))

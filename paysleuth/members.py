@@ -7,7 +7,7 @@ from . import audit
 from .allocation import balances
 from .db import lock_members, tenant_tx
 from .errors import Conflict, NotFound, PreconditionFailed
-from .money import to_rupees
+from .money import check_text, to_rupees
 from .periods import check_period
 
 EDITABLE = {"name", "guardian_name", "phone", "billing_day", "concession_pct"}
@@ -41,7 +41,7 @@ def normalise_phone(value: str | None) -> str | None:
 
 
 def _clean_name(value: str | None, field: str, *, required: bool) -> str | None:
-    text = " ".join((value or "").split())
+    text = " ".join(check_text(value, field).split())
     if not text:
         if required:
             raise ValueError(f"{field} is required")
