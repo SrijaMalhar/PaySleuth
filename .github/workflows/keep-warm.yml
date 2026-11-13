@@ -10,10 +10,13 @@ name: Keep warm
 # roughly 720 and leaves almost none, so the window is deliberate rather than
 # lazy -- nobody is clicking the link at 04:00 IST.
 #
-# Needs one repository secret: PAYSLEUTH_URL (https://your-service.onrender.com).
-# Without it the job exits quietly, so a fork does not fail.
+# Needs one repository secret of its own: PAYSLEUTH_KEEP_WARM_URL. It is
+# deliberately not PAYSLEUTH_URL, which scheduled-jobs.yml uses, so that a
+# deploy on a host that does not sleep -- Hugging Face Spaces, or any paid
+# plan -- gets the scheduled jobs without this pinging it every 14 minutes for
+# no reason. Set this secret only where sleeping is the problem.
 #
-# Delete this workflow on a paid plan, where nothing sleeps.
+# Without it the job exits quietly, so a fork does not fail.
 on:
   schedule:
     # Every 14 minutes (under Render's 15-minute idle timeout), 00:30-18:29 UTC
@@ -33,10 +36,10 @@ jobs:
     steps:
       - name: Wake the service
         env:
-          URL: ${{ secrets.PAYSLEUTH_URL }}
+          URL: ${{ secrets.PAYSLEUTH_KEEP_WARM_URL }}
         run: |
           if [ -z "$URL" ]; then
-            echo "PAYSLEUTH_URL is not set; nothing to do."
+            echo "PAYSLEUTH_KEEP_WARM_URL is not set; nothing to do."
             exit 0
           fi
           # /health needs no key and touches the database, so a pass means the

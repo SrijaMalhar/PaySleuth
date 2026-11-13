@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
 # A non-root user: the container needs no root, and a compromised process
-# should not be able to write to the image.
-RUN useradd --create-home --uid 10001 paysleuth
+# should not be able to write to the image. UID 1000 because Hugging Face
+# Spaces starts the container as that uid, and files owned by anyone else
+# become unreadable when the platform switches user at runtime.
+RUN useradd --create-home --uid 1000 paysleuth
 WORKDIR /app
 
 # Dependencies first, so a code change does not reinstall them.

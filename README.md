@@ -687,7 +687,16 @@ actually do rather than what they advertise:
 - **`.github/workflows/keep-warm.yml`** pings `/health` every 14 minutes between 06:00 and 00:00 IST,
   because a free service sleeps after 15 idle minutes and takes about a minute to wake. 18 hours a day is
   roughly 540 of the 750 free instance hours a month; round the clock would be about 720 and leave no
-  margin, which is why the window is a window.
+  margin, which is why the window is a window. It reads its own secret rather than sharing
+  `PAYSLEUTH_URL`, so a host that does not sleep gets the scheduled jobs without the pinging.
+
+`deploy/huggingface/` is the second target, for a host that asks for no card and does not sleep. A Space
+is its own git repository and takes its configuration from YAML at the top of `README.md` — which would
+put a stray table above the first line of this one, so that block lives in `deploy/huggingface/README.md`
+and `sync.sh` swaps it in while publishing. The script publishes `git archive HEAD` rather than the
+working directory, so an untracked scratch file, or a real institution's statement sitting in the folder,
+cannot reach a public Space. The one thing it needed from the image was `UID 1000`: Spaces start the
+container as that user, and files owned by anyone else become unreadable when the platform switches user.
 
 **The role the provider gives you is not the role to run as.** A managed PostgreSQL hands you an owner
 that belongs to the provider's own administrative role — `neon_superuser`, `supabase_admin` — and those
