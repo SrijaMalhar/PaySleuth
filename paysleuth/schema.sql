@@ -43,6 +43,91 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS audit_log_recent ON audit_log (institution_id, id DESC);
 
+-- A fee holds from its effective month until the next change.
+CREATE TABLE IF NOT EXISTS member_fees (
+    institution_id   bigint      NOT NULL REFERENCES institutions(id),
+    member_id        bigint      NOT NULL REFERENCES members(id),
+    effective_period text        NOT NULL CHECK (effective_period ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+    monthly_fee      bigint      NOT NULL CHECK (monthly_fee > 0),
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (member_id, effective_period)
+);
+
+-- One UPI ID can belong to several siblings, so the key includes the member.
+CREATE TABLE IF NOT EXISTS member_upi_ids (
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    upi_id          text        NOT NULL,
+    member_id       bigint      NOT NULL REFERENCES members(id),
+    source          text        NOT NULL CHECK (source IN ('registered', 'learned')),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (institution_id, upi_id, member_id)
+);
+CREATE INDEX IF NOT EXISTS member_upi_ids_member ON member_upi_ids (member_id);
+
+-- What a member owes. There is no balance column anywhere: outstanding and
+-- credit are always computed from charges, payments and allocations.
+CREATE TABLE IF NOT EXISTS charges (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    member_id       bigint      NOT NULL REFERENCES members(id),
+    period          text        NOT NULL CHECK (period ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+    kind            text        NOT NULL CHECK (kind IN ('monthly_fee', 'late_fee')),
+    gross           bigint      NOT NULL CHECK (gross > 0),
+    concession      bigint      NOT NULL DEFAULT 0 CHECK (concession >= 0),
+    amount          bigint      NOT NULL CHECK (amount > 0),
+    due_date        date        NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CHECK (amount = gross - concession),
+    UNIQUE (member_id, period, kind)          -- a month is billed once, enforced by the database
+);
+CREATE INDEX IF NOT EXISTS charges_member_due ON charges (member_id, due_date, id);
+
+-- A credit line from the bank statement. The UTR is the idempotency key.
+CREATE TABLE IF NOT EXISTS bank_credits (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    utr             text        NOT NULL,
+    channel         text        NOT NULL DEFAULT 'UPI'
+                                CHECK (channel IN ('UPI', 'NEFT', 'IMPS', 'RTGS', 'OTHER')),
+    amount          bigint      NOT NULL CHECK (amount > 0),
+    payer_upi_id    text,
+    payer_name      text,
+    note            text,
+    narration       text,
+    received_at     timestamptz NOT NULL,
+    status          text        NOT NULL CHECK (status IN ('needs_review', 'matched')),
+    match_rule      text        CHECK (match_rule IN ('ref_code', 'known_upi_id', 'sibling_split', 'manual')),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CHECK ((status = 'matched') = (match_rule IS NOT NULL)),
+    UNIQUE (institution_id, utr)
+);
+CREATE INDEX IF NOT EXISTS bank_credits_queue ON bank_credits (institution_id, status, received_at);
+
+-- The share of one bank credit that belongs to one member.
+CREATE TABLE IF NOT EXISTS payments (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    bank_credit_id  bigint      NOT NULL REFERENCES bank_credits(id),
+    member_id       bigint      NOT NULL REFERENCES members(id),
+    amount          bigint      NOT NULL CHECK (amount > 0),
+    received_at     timestamptz NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (bank_credit_id, member_id)
+);
+CREATE INDEX IF NOT EXISTS payments_member ON payments (member_id, received_at, id);
+
+-- How much of a payment went to a charge. One running total per pair.
+CREATE TABLE IF NOT EXISTS allocations (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    payment_id      bigint      NOT NULL REFERENCES payments(id),
+    charge_id       bigint      NOT NULL REFERENCES charges(id),
+    amount          bigint      NOT NULL CHECK (amount > 0),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (payment_id, charge_id)
+);
+CREATE INDEX IF NOT EXISTS allocations_charge ON allocations (charge_id);
+
 -- Row-level security: a transaction sees only the institution named in
 -- app.institution_id, and sees nothing at all when none is set.
 --
@@ -51,7 +136,8 @@ CREATE INDEX IF NOT EXISTS audit_log_recent ON audit_log (institution_id, id DES
 DO $$
 DECLARE t text;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['members', 'audit_log'] LOOP
+    FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
+                             'bank_credits', 'payments', 'allocations'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class
