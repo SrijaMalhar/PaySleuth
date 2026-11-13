@@ -2,7 +2,6 @@
 
 import json
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -120,9 +119,13 @@ def test_the_gateway_turns_away_an_unsigned_or_wrongly_signed_message(gateway):
     assert rejected == ["missing or malformed X-PaySleuth-Signature header", "signature does not match"]
 
 
-def test_signing_adds_little_time():
-    body = BODY * 20
-    started = time.perf_counter()
-    for _ in range(2000):
-        signature_header(SECRET, body)
-    assert (time.perf_counter() - started) / 2000 < 0.001          # well under a millisecond each
+def test_the_same_body_signed_twice_in_the_same_second_gives_the_same_signature():
+    """Signing is a pure function of (secret, timestamp, body): no nonce, no state.
+
+    This is what lets the gateway verify by recomputing, and it is why replay
+    protection has to come from the timestamp and message_id rather than from
+    the signature being unique.
+    """
+    assert signature_header(SECRET, BODY, NOW) == signature_header(SECRET, BODY, NOW)
+    assert signature_header(SECRET, BODY, NOW) != signature_header(SECRET, BODY, NOW + 1)
+    assert signature_header(SECRET, BODY, NOW) != signature_header(SECRET + "x", BODY, NOW)

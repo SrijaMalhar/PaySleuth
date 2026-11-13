@@ -20,7 +20,11 @@ from .institutions import settings
 from .money import to_rupees
 from .periods import IST, utc_now
 
-MAX_ATTEMPTS = 8
+# 12 attempts over about two and a half hours: long enough to ride out a gateway
+# outage, short enough that a genuinely undeliverable message is parked the same
+# working day. The cap is reached on the last few waits, which is what makes it
+# a real limit rather than dead code.
+MAX_ATTEMPTS = 12
 VISIBILITY_TIMEOUT = timedelta(seconds=60)
 
 
@@ -63,7 +67,7 @@ def enqueue_many(conn, inst: int, *, kind: str, rows) -> list[str]:
 
 
 def backoff(attempts: int) -> timedelta:
-    """5, 10, 20, 40 ... seconds, capped at an hour."""
+    """5, 10, 20, 40 ... seconds, capped at an hour (reached on attempt 11)."""
     return timedelta(seconds=min(5 * 2 ** (attempts - 1), 3600))
 
 

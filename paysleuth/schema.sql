@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS statement_imports (
     closing_balance  bigint,
     total_credits    bigint      NOT NULL DEFAULT 0,
     total_debits     bigint      NOT NULL DEFAULT 0,
+    -- Of total_credits, how much became bank_credits rows, and how much was lost
+    -- on lines that could not be imported. NULL until the import finishes.
+    credits_recorded bigint,
+    credits_dropped  bigint,
+    repeated_lines   jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- lines the bank printed twice
+    newest_first     boolean     NOT NULL DEFAULT false,         -- the export ran newest to oldest
     line_count       integer     NOT NULL DEFAULT 0,
     continuity       text        NOT NULL CHECK (continuity IN ('ok', 'broken', 'no_balance')),
     follows          text        NOT NULL CHECK (follows IN ('first', 'continues', 'gap', 'overlap', 'unknown')),

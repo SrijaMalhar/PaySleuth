@@ -17,7 +17,8 @@ from paysleuth import banks
 from paysleuth.banks.common import full_upi_id
 from paysleuth.continuity import check_continuity
 from paysleuth.money import to_rupees
-from paysleuth.statements import parse_statement
+from paysleuth.banks import canara, hdfc, icici, sbi
+from paysleuth.statements import parse_narration, parse_statement
 
 GOLDEN = Path(__file__).parent / "golden"
 BANKS = {"sbi": "SBI", "hdfc": "HDFC", "icici": "ICICI", "axis": "Axis", "canara": "Canara"}
@@ -58,6 +59,28 @@ def test_a_truncated_or_masked_upi_id_is_never_stored():
     sbi = _result((GOLDEN / "sbi.csv").read_text())["credits"]
     assert sbi[0]["payer_upi_id"] is None and sbi[1]["payer_upi_id"] == "rk.verma@okhdfcbank"
     assert all(c["payer_upi_id"] is None for c in _result((GOLDEN / "canara.csv").read_text())["credits"])
+
+
+@pytest.mark.parametrize("narration", [
+    # Every narration shape that carries a UPI ID, each with that ID masked by the bank.
+    "UPI/CR/615412345601/SUNITA SHARMA/SBIN/**sharma@oksbi/June fees",             # generic slash
+    "UPI-SUNITA SHARMA-**sharma@oksbi-SBIN0001234-615412345601-JUNE FEES",         # generic hyphen
+    "BY TRANSFER-UPI/CR/615412345601/SUNITA S/SBIN/sunita.sha/June fees--",        # SBI
+    "UPI-SUNITA SHARMA-**SHARMA@OKSBI-SBIN0001234-615412345601-JUNE FEES",         # HDFC
+    "UPI/615412345601/June fees/**sharma@oksbi/State Bank Of India/ICI0a1b2c3d",   # ICICI
+    "UPI/CR/615412345601/SUNITA SHARMA/SBIN/**sharma@oksbi/June fees//CNRB0001234",  # Canara
+])
+def test_no_narration_shape_keeps_a_masked_upi_id(narration):
+    """Not just the helper: every parser that reads a UPI ID must drop a masked one.
+
+    The bug this guards: the generic parser kept the masked string, which then
+    failed validation in normalise_upi_id and dropped the whole credit line.
+    """
+    for parse in (parse_narration, sbi.narration, hdfc.narration, icici.narration, canara.narration):
+        parsed = parse(narration)
+        if parsed is not None:
+            assert parsed["payer_upi_id"] is None, f"{parse.__module__} kept {parsed['payer_upi_id']!r}"
+            assert parsed["utr"] == "615412345601"
 
 
 def test_an_unknown_layout_falls_back_to_the_generic_parser():

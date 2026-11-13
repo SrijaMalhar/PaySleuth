@@ -85,9 +85,10 @@ def test_failed_sends_retry_with_backoff_then_park_as_dead(conn, inst):
 
 
 def test_backoff_doubles_and_is_capped_at_an_hour():
-    assert [backoff(n).total_seconds() for n in (1, 2, 3, 4)] == [5, 10, 20, 40]
-    assert backoff(20).total_seconds() == 3600
-    assert sum(backoff(n).total_seconds() for n in range(1, MAX_ATTEMPTS)) == 635     # ~11 minutes
+    waits = [backoff(n).total_seconds() for n in range(1, MAX_ATTEMPTS)]   # the waits actually used
+    assert waits[:4] == [5, 10, 20, 40]
+    assert waits[-1] == 3600, "the cap must be reached before a message is parked, or it is dead code"
+    assert max(waits) == 3600 and sum(waits) == 8715                       # about 2 hours 25 minutes
 
 
 def test_a_members_receipts_arrive_in_payment_order_even_while_one_is_retried(conn, inst):

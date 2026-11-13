@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from .alerts import raise_alert
 from .continuity import Continuity
 from .db import tenant_tx
+from .errors import NotFound
 from .money import to_rupees
 
 
@@ -52,11 +53,11 @@ def record_statement(conn, inst: int, text: str, check: Continuity, line_count: 
         row = conn.execute(
             """INSERT INTO statement_imports (institution_id, account, file_sha256, first_at, last_at,
                    opening_balance, closing_balance, total_credits, total_debits, line_count,
-                   continuity, follows, breaks)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                   continuity, follows, breaks, repeated_lines, newest_first)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
             (inst, account, digest, check.first_at, check.last_at, check.opening, check.closing,
              check.total_credits, check.total_debits, line_count, check.status, follows,
-             Jsonb(check.breaks))).fetchone()
+             Jsonb(check.breaks), Jsonb(check.repeated_lines), check.newest_first)).fetchone()
         if check.status == "broken":
             raise_alert(conn, inst, "statement_broken",
                         f"Statement {row['id']}: the running balance breaks at line "
@@ -70,6 +71,51 @@ def record_statement(conn, inst: int, text: str, check: Continuity, line_count: 
         return _statement_view(row, already_imported=False, gap=gap)
 
 
+def check_credits_landed(conn, inst: int, statement_id: int, credits) -> dict:
+    """Check every credit line in a statement against the books, and alert on any that is missing.
+
+    The rule: each distinct (UTR, amount) the statement printed must have a
+    bank_credits row with that UTR and that amount. Anything else is money the
+    bank says it received that the books do not have.
+
+    This asks the database, rather than trusting the importer's own report of
+    what it did, so a line lost to any cause is caught: a narration the parser
+    could not read, a UTR it rejected, a UTR that came back with a different
+    amount, or a bug in the import itself. A line the bank printed twice is one
+    (UTR, amount) pair, so a reprint is neither counted twice nor called
+    missing.
+    """
+    printed = {}
+    for credit in credits:
+        printed[(credit.utr, credit.amount)] = credit.line
+    recorded_total, dropped, missing = 0, 0, []
+    with tenant_tx(conn, inst):
+        found = set()
+        if printed:
+            found = {(r["utr"], r["amount"]) for r in conn.execute(
+                "SELECT utr, amount FROM bank_credits WHERE utr = ANY(%s)",
+                ([utr for utr, _ in printed],)).fetchall()}
+        for (utr, amount), line in sorted(printed.items(), key=lambda pair: pair[1]):
+            if (utr, amount) in found:
+                recorded_total += amount
+            else:
+                dropped += amount
+                missing.append({"line": line, "utr": utr, "amount": to_rupees(amount)})
+        row = conn.execute(
+            "UPDATE statement_imports SET credits_recorded = %s, credits_dropped = %s "
+            "WHERE id = %s RETURNING id, total_credits", (recorded_total, dropped, statement_id)).fetchone()
+        if row is None:
+            raise NotFound(f"statement {statement_id} not found")
+        if missing:
+            raise_alert(conn, inst, "credits_missing",
+                        f"Statement {statement_id}: Rs {to_rupees(dropped)} it credits is not in the "
+                        f"books ({len(missing)} line(s), first at line {missing[0]['line']})",
+                        f"statement:{statement_id}:missing", statement_id=statement_id,
+                        dropped=to_rupees(dropped), missing=missing[:20])
+    return {"credits_recorded": to_rupees(recorded_total), "credits_dropped": to_rupees(dropped),
+            "credits_missing": missing[:20]}
+
+
 def _money(value: int | None) -> str | None:
     return None if value is None else to_rupees(value)
 
@@ -79,6 +125,9 @@ def _statement_view(row: dict, *, already_imported: bool, gap: dict | None = Non
             "follows": row["follows"], "opening_balance": _money(row["opening_balance"]),
             "closing_balance": _money(row["closing_balance"]),
             "total_credits": to_rupees(row["total_credits"]), "total_debits": to_rupees(row["total_debits"]),
+            "credits_recorded": _money(row["credits_recorded"]),
+            "credits_dropped": _money(row["credits_dropped"]),
+            "repeated_lines": row["repeated_lines"], "newest_first": row["newest_first"],
             "breaks": row["breaks"], "gap": gap}
 
 
@@ -101,10 +150,16 @@ def run_close(conn, inst: int, day: date) -> dict:
                  COALESCE((SELECT SUM(amount) FROM bank_credits WHERE status = 'reversed'), 0)      AS reversed,
                  (SELECT COUNT(*) FROM bank_credits)                                                AS credits,
                  (SELECT COUNT(*) FROM alerts WHERE status = 'open'
-                     AND kind IN ('statement_broken', 'statement_gap'))                             AS statement_alerts
+                     AND kind IN ('statement_broken', 'statement_gap', 'credits_missing'))        AS statement_alerts,
+                 COALESCE((SELECT SUM(credits_dropped) FROM statement_imports), 0)                  AS dropped
             """).fetchone()
+        # paid is every live payment; applied is what those payments have been put
+        # against charges. The difference is money held for a member, not yet owed.
         advance = f["paid"] - f["applied"]
-        unexplained = f["credited"] - f["applied"] - advance - f["waiting"] - f["reversed"]
+        # Three independent checks, not one: that the recorded credits are all
+        # accounted for, that no more has been applied than was received, and that
+        # no statement line was lost on the way in.
+        unexplained = f["credited"] - f["paid"] - f["waiting"] - f["reversed"]
         mismatched = []
         if unexplained != 0:
             mismatched = conn.execute(
@@ -116,19 +171,22 @@ def run_close(conn, inst: int, day: date) -> dict:
         figures = {
             "credits": f["credits"],
             "credited": to_rupees(f["credited"]),
+            "dropped_by_import": to_rupees(f["dropped"]),
             "applied_to_bills": to_rupees(f["applied"]),
             "held_as_advance": to_rupees(advance),
             "waiting_for_review": to_rupees(f["waiting"]),
             "returned_by_bank": to_rupees(f["reversed"]),
             "unexplained": to_rupees(unexplained),
-            "books_balance": unexplained == 0,
+            "books_balance": unexplained == 0 and advance >= 0,
+            "every_statement_line_imported": f["dropped"] == 0,
             "statements_complete": f["statement_alerts"] == 0,
             "open_statement_alerts": f["statement_alerts"],
             "mismatched_credits": [{"id": m["id"], "utr": m["utr"], "status": m["status"],
                                     "amount": to_rupees(m["amount"]), "applied": to_rupees(m["applied"])}
                                    for m in mismatched],
         }
-        status = "clean" if figures["books_balance"] and figures["statements_complete"] else "attention"
+        status = ("clean" if figures["books_balance"] and figures["statements_complete"]
+                  and figures["every_statement_line_imported"] else "attention")
         conn.execute(
             """INSERT INTO daily_closes (institution_id, day, status, figures) VALUES (%s, %s, %s, %s)
                ON CONFLICT (institution_id, day)

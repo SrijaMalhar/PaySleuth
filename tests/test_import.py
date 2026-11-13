@@ -6,7 +6,10 @@ import pytest
 from conftest import fresh_pool
 from factory import books, build_institution, messy_statement
 from paysleuth.importer import _DisjointSet, import_statement
+from paysleuth.alerts import list_alerts
+from paysleuth.db import tenant_tx
 from paysleuth.institutions import create_institution
+from paysleuth.money import to_rupees
 from paysleuth.payments import record_credit
 from paysleuth.statements import parse_statement
 
@@ -36,22 +39,23 @@ def _books(pool, inst):
         return books(conn, inst)
 
 
-@pytest.mark.parametrize("seed", [1, 2, 3])
-def test_parallel_import_gives_exactly_the_books_of_a_serial_import(seed):
-    with fresh_pool() as serial_pool, fresh_pool() as parallel_pool:
+@pytest.mark.parametrize("seed, workers", [(1, 8), (2, 8), (3, 8), (4, 1), (4, 4), (4, 16)])
+def test_parallel_import_gives_exactly_the_books_of_a_serial_import(seed, workers):
+    """Every worker count is compared with a line-by-line import, not with another parallel run."""
+    with fresh_pool(max_size=workers + 4) as serial_pool, fresh_pool(max_size=workers + 4) as parallel_pool:
         inst_s, families, rng = _institution(serial_pool, seed)
         inst_p, _, _ = _institution(parallel_pool, seed)
         text = messy_statement(families, rng, rounds=2)
 
         _serial(serial_pool, inst_s, text)
-        summary = import_statement(parallel_pool, inst_p, text, workers=8)
+        summary = import_statement(parallel_pool, inst_p, text, workers=workers)
 
         assert summary["recorded"] > 40 and summary["duplicates"] > 0 and summary["conflicts"] == 1
         assert summary["skipped_debits"] == 1
         assert summary["groups"] > 1
         serial, parallel = _books(serial_pool, inst_s), _books(parallel_pool, inst_p)
         for part in ("credits", "payments", "allocations", "receipts"):
-            assert parallel[part] == serial[part], part
+            assert parallel[part] == serial[part], f"{part} differs at {workers} workers"
 
 
 def test_reimporting_an_overlapping_statement_changes_nothing(pool):
@@ -80,14 +84,22 @@ def test_bad_lines_are_reported_with_line_numbers_and_the_rest_import(pool):
     assert summary["errors"] == 3
 
 
-def test_any_number_of_workers_gives_the_same_books():
-    results = []
-    for workers in (1, 4, 16):
-        with fresh_pool(max_size=20) as pool:
-            inst, families, rng = _institution(pool, 11)
-            import_statement(pool, inst, messy_statement(families, rng, rounds=2), workers=workers)
-            results.append(_books(pool, inst))
-    assert results[0] == results[1] == results[2]
+def test_every_statement_line_is_accounted_for_after_an_import(pool):
+    """What the statement says it credited, minus what could not be imported, is what landed."""
+    inst, families, rng = _institution(pool, 13)
+    text = messy_statement(families, rng)
+    summary = import_statement(pool, inst, text, workers=4)
+    statement = summary["statement"]
+    assert statement["continuity"] == "no_balance"        # the generated statement prints no balance
+    # The statement repeats one UTR with a different amount. That Rs 1.00 line is
+    # money the statement claims and the books do not have, so it counts as dropped
+    # and raises an alert rather than being quietly ignored.
+    assert summary["conflicts"] == 1 and statement["credits_dropped"] == "1.00"
+    with pool.connection() as conn:
+        assert [a["kind"] for a in list_alerts(conn, inst)] == ["credits_missing"]
+        with tenant_tx(conn, inst):
+            landed = conn.execute("SELECT COALESCE(SUM(amount), 0) AS n FROM bank_credits").fetchone()["n"]
+    assert to_rupees(landed) == statement["credits_recorded"]
 
 
 def test_union_find_joins_everything_connected():

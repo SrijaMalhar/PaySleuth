@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from . import banks
+from .banks.common import full_upi_id
 from .money import to_paise
 from .periods import IST
 
@@ -101,8 +102,11 @@ def parse_narration(text: str | None) -> dict | None:
     for pattern in (_SLASH_UPI, _HYPHEN_UPI):
         m = pattern.match(narration)
         if m:
+            # full_upi_id, not .lower(): a bank that prints the ID masked
+            # ("**sharma@oksbi") or cut short must yield no ID rather than a
+            # broken one, which would otherwise fail validation and lose the line.
             return {"channel": "UPI", "utr": m["utr"], "payer_name": _clean(m["name"]),
-                    "payer_upi_id": m["upi"].lower(), "note": _clean(m["note"])}
+                    "payer_upi_id": full_upi_id(m["upi"]), "note": _clean(m["note"])}
     m = _NEFT_IMPS.match(narration)
     if m:
         return {"channel": m["channel"], "utr": m["utr"], "payer_name": _clean(m["name"]),

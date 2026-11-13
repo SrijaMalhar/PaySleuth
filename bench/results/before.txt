@@ -1,4 +1,9 @@
 # Before the performance pass (commit 7c01c23), same machine.
+#
+# The query counts here were taken with bench/query_count.py at the time, and the
+# two rows marked (a) were counted by hand with the same wrapper before the
+# matching tests existed; they are not reproducible from this commit, because the
+# code they measured is gone. Everything else was captured from a run.
 
 ## Queries and time per credit
 
@@ -6,6 +11,8 @@ case                                queries  median ms  slowest ms
 one member, by reference code            13        3.3         8.2
 two siblings, split by dues              22        3.7        11.3
 unknown payer, straight to review         4        1.0         2.6
+reversing a six-child split             23          -           -   (a)
+review queue, 25 waiting credits      ~100          -           -   (a)
 
 ## Import scaling and lock granularity
 

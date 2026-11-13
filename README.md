@@ -7,7 +7,7 @@ which member each UPI transfer is for, applies it to what they owe, sends receip
 tells the owner when the statement itself is missing something. It never moves money and never talks
 to a payment network.
 
-Python 3.12, FastAPI, PostgreSQL 16, psycopg 3, no ORM. 246 tests against a real database, and a
+Python 3.12, FastAPI, PostgreSQL 16, psycopg 3, no ORM. 260 tests against a real database, and a
 mutation check that removes each safety mechanism in turn to prove the tests would notice.
 
 ## The problem
@@ -82,15 +82,26 @@ weak suggestions are what a 15-point amount coincidence looks like: the owner le
 ## How it works
 
 ```
-bank CSV ──parse──> continuity check ──> credits ──group (union-find)──> worker threads
-                      │ opening = previous closing?                          │ per credit, one transaction:
-                      │ closing = opening + credits - debits?                │   lock candidate members (id order)
-                      ▼ no: alert, still imported                            │   INSERT bank_credit ON CONFLICT (utr)
-                   alerts                                                     │   decide (5 rules) ──no──> review queue
-                      ▲                                                       │   payment -> settle oldest-first        │
-                      │ every rupee applied, held, reviewed or returned?      │   -> receipt row                  person │
-                   daily close <───────────────────────────────────────────────┘                        ◄──────────────┘
-                                                                             outbox ──SKIP LOCKED──> signed webhook
+                    ┌─ continuity: closing = opening + credits - debits, and
+                    │  opening = the previous statement's closing
+bank CSV ──parse────┤
+                    │                   ┌────────── per credit, one transaction ───────────┐
+                    └─ credits ──group─>│ lock candidate members, ascending id order       │
+                       (union-find over │ decide (5 rules) ──unsure──> status needs_review │
+                        UTR + candidate │ INSERT bank_credit ON CONFLICT (utr) DO NOTHING  │
+                        member nodes)   │ payment → settle oldest-first → receipt row      │
+                                        └──┬────────────────────────────┬──────────────────┘
+                                           │                            │
+                                     review queue                 outbox: claimed
+                                  suggestions, never applied      SKIP LOCKED, signed,
+                                           │                      retried, then dead
+                                           ▼                            │
+                                  a person assigns, splits             ▼
+                                  or reassigns (two people      SMS / WhatsApp gateway
+                                  above the limit)
+
+   every statement line in the books?   every rupee applied, held, reviewed or returned?
+                        └───────────────> daily close ──any mismatch──> alerts <───────┘
 ```
 
 ## Design decisions
@@ -108,12 +119,23 @@ allocations. Moving or reversing money writes correction rows: a negative alloca
 negative payment pointing at the original. Every reader already sums, so balances and reports work
 unchanged, and no money record is ever lost. A partial unique index lets a payment be voided once.
 
-**Noticing when data is missing, not just when it is wrong.** Banks print a running balance, so every
-line's balance must equal the previous plus its credit minus its debit, and each statement's opening
-balance must equal the previous statement's closing balance. A dropped page, an unreadable line or an
-altered amount breaks the chain and raises an alert with the unaccounted amount. The daily close then
-checks the other direction: every rupee the bank credited is applied to a bill, held as an advance,
-waiting for review, or returned.
+**Noticing when data is missing, not just when it is wrong.** Three checks, each catching what the
+others cannot:
+
+- *Within a statement.* Banks print a running balance, so every line's balance must equal the previous
+  plus its credit minus its debit. An unreadable or altered line breaks the chain, and the alert names
+  the line and the unaccounted amount.
+- *Between statements.* Each file's opening balance must equal the previous file's closing balance for
+  that account, or a page or a day is missing.
+- *Into the books.* Every distinct (UTR, amount) the statement printed must have a `bank_credits` row
+  with that UTR and that amount. This one asks the database rather than trusting the importer's report,
+  so a line lost to a narration the parser could not read, a UTR it rejected, a UTR that came back with
+  a different amount, or a bug in the import itself is all caught the same way.
+
+The daily close then checks the other direction: every rupee that did land is applied to a bill, held
+as an advance, waiting for review, or returned, and no more has been applied than was received. A
+statement that fails any check is still imported, because its readable credits are real, but it is
+flagged and raises an alert rather than being silently trusted.
 
 **Concurrency.** Money operations lock the bank credit row first (manual actions), then member rows in
 ascending id order.
@@ -169,21 +191,24 @@ fits on one PostgreSQL. In money, a rule that can be explained beats a model tha
 |---|---|---|
 | `test_payments.py` | 34 | Matching, idempotency, allocation, assign, split, reassign, append-only history |
 | `test_parsing.py` | 29 | Money, months, names, narrations, CSV layouts |
-| `test_suggestions_and_tenancy.py` | 19 | Rules, suggestion ranking, tenant isolation |
+| `test_close.py` | 20 | Statement continuity, gaps, missing credit lines, alerts, the daily close |
 | `test_messages.py` | 19 | Outbox delivery, retries, ordering, reminders, quiet hours |
-| `test_webhooks.py` | 18 | Signing, verification, replay and tamper refusal |
+| `test_suggestions_and_tenancy.py` | 19 | Rules, suggestion ranking, tenant isolation |
 | `test_monitoring.py` | 18 | Metrics, masked logs, the demo seed |
+| `test_webhooks.py` | 18 | Signing, verification, replay and tamper refusal |
 | `test_billing.py` | 17 | Catch-up, fee history, scholarships, late fees, optimistic locking |
-| `test_close.py` | 15 | Statement continuity, gaps, alerts, the daily close |
+| `test_banks.py` | 15 | Golden statement per bank, masked UPI IDs, anonymiser |
 | `test_api.py` | 14 | Keys, ETags, validation, end-to-end flows, reports |
 | `test_staff.py` | 12 | Roles, audit actors, two-person approval |
-| `test_concurrency.py` | 11 | Every race in the table above |
-| `test_reversals.py` | 9 | Returned credits, reopened charges, statement reversals |
+| `test_concurrency.py` | 11 | Races run for real against PostgreSQL |
+| `test_import.py` | 10 | Parallel import equals serial import, at every worker count |
 | `test_performance.py` | 9 | Query counts per credit, held to a number |
-| `test_banks.py` | 9 | Golden statement per bank, anonymiser |
-| `test_import.py` | 7 | Parallel import equals serial import |
+| `test_reversals.py` | 9 | Returned credits, reopened charges, statement reversals |
 | `test_evaluation.py` | 5 | Matching report, weight tuning, cross-validation |
 | `test_invariants.py` | 1 | Hypothesis state machine over every operation |
+
+The concurrency table above names nine tests; seven are in `test_concurrency.py`, and the outbox and
+approval races live with their own subjects in `test_messages.py` and `test_staff.py`.
 
 Nothing is mocked: every test runs against a real PostgreSQL in its own schema.
 
@@ -218,8 +243,10 @@ self-approval allowed                                      caught
 approval row lock removed                                  caught
 webhook timestamp not covered by the signature             caught
 webhook timestamp window removed                           caught
+statement lines not checked against the books              caught
+generic parser keeps a masked UPI ID                       caught
 
-16/16 mutations caught
+18/18 mutations caught
 ```
 
 One mechanism is deliberately not in that list. Swapping `hmac.compare_digest` for `==` answers
@@ -235,21 +262,28 @@ Putting any of these back fails a test by name:
   part-paid.
 - Siblings paying before their first month were not split, because no fee was in force yet.
 - Grouping a parallel import by each credit's first candidate member (see the write-up).
-- A truncated or masked UPI ID (`sunita.sha`, `**sharma@oksbi`) stored as if it were the payer's.
+- A truncated or masked UPI ID (`sunita.sha`, `**sharma@oksbi`) kept as the payer's, in any of the six
+  narration shapes that carry one. In the generic parser this used to fail validation downstream and
+  drop the whole credit line.
+- The daily close summing only the credits that landed, so a statement line that never became a row was
+  absent from both sides of the arithmetic and the close reported "clean". Found by auditing this
+  README against the code: the claim was written before the check existed.
 
 ## Benchmarks
 
 On a 2-core x86_64 cloud VM with PostgreSQL 16 on the same machine. Full output in
 [bench/results/](bench/results/).
 
-Queries per credit, before and after the performance pass:
+Queries per credit, before and after the performance pass. The "after" column is asserted by
+`tests/test_performance.py`, so it cannot drift; the two starred "before" figures were counted by hand
+against code that no longer exists, and are not reproducible from the repository.
 
 | | before | after |
 |---|---|---|
 | one member, by reference code | 13 | 11 |
 | two siblings, split by dues | 22 | 13 |
-| reversing a 6-child split | 23 | 13 |
-| review queue, 25 waiting credits | ~100 | 6 |
+| reversing a 6-child split | 23* | 13 |
+| review queue, 25 waiting credits | ~100* | 6 |
 
 ```
 import scaling: 4675 statement lines, 500 members, 694 groups
@@ -264,23 +298,27 @@ lock granularity: 8 threads x 100 transfers
   different members    503.1 transfers/s
   one member           164.3 transfers/s
 
-API latency, 8 clients, 500 members, 60s: 2686 requests, 44/s
+API latency, 8 clients, 300 members, 25s: 1567 requests, 62/s
 endpoint                              n   p50 ms   p95 ms   p99 ms
-GET /members/{id}/statement         270       57      311      427
-GET /reports/ageing                 269      173      408      517
-GET /reports/collection             272      195      548      690
-GET /review                         279      455      794     1126
-POST /bank-credits                 1211       80      370      563
-POST /bank-credits (split)          385       67      335      447
+GET /members/{id}/statement         164       56      238      314
+GET /reports/ageing                 163       91      234      289
+GET /reports/collection             145      153      333      505
+GET /review                         145      302      554      625
+POST /bank-credits                  711       82      246      374
+POST /bank-credits (split)          239       71      227      342
 ```
+
+That configuration matches the "before" run below, so the two are comparable. A longer run at 500
+members is in `bench/results/after.txt`; it is slower across the board, as a bigger member list makes
+every suggestion pass and every report do more work.
 
 The speed-up flattens at 2 workers because the machine has 2 cores and shares them with PostgreSQL.
 The fingerprint is a hash of the whole set of books: it is the same for every worker count, and the
 same before and after the performance pass, so neither changed a result.
 
 Load testing found the one real performance bug: `GET /review` re-read every member, their dues, their
-fees and the payer's family for each waiting credit, giving a p50 of 2057ms and a p95 of 3976ms.
-Reading them once per page took that to 262ms and 495ms, and throughput from 26/s to 63/s.
+fees and the payer's family for each waiting credit, giving a p50 of 2057ms and a p95 of 3976ms at 300
+members. Reading them once per page took that to 302ms and 554ms, and throughput from 26/s to 62/s.
 
 ## Deploying
 

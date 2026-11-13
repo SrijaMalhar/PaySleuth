@@ -91,6 +91,15 @@ MUTATIONS = [
     Mutation("webhook timestamp window removed", "paysleuth/webhooks.py",
              (("    if abs(moment - timestamp) > tolerance:", "    if False:"),),
              "tests/test_webhooks.py::test_an_old_message_sent_again_is_refused"),
+    Mutation("statement lines not checked against the books", "paysleuth/importer.py",
+             (("            statement.update(check_credits_landed(conn, inst, statement[\"id\"],\n"
+               "                                                  list(parsed.credits) + unreadable))",
+               "            pass"),),
+             "tests/test_close.py::test_a_credit_line_that_cannot_be_imported_is_reported_as_missing"),
+    Mutation("generic parser keeps a masked UPI ID", "paysleuth/statements.py",
+             (("                    \"payer_upi_id\": full_upi_id(m[\"upi\"]), \"note\": _clean(m[\"note\"])}",
+               "                    \"payer_upi_id\": m[\"upi\"].lower(), \"note\": _clean(m[\"note\"])}"),),
+             "tests/test_close.py::test_a_masked_upi_id_in_an_unrecognised_layout_no_longer_loses_the_line"),
 ]
 
 

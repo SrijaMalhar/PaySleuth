@@ -16,8 +16,9 @@ just depend on timing.
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
-from .close import record_statement
+from .close import check_credits_landed, record_statement
 from .continuity import check_continuity
 from .db import tenant_tx
 from .errors import Conflict, NotFound
@@ -25,6 +26,18 @@ from .matching import candidate_members
 from .members import normalise_upi_id
 from .payments import normalise_utr, record_credit, reverse_credit
 from .statements import Credit, parse_statement
+
+
+@dataclass(frozen=True)
+class UnparsedCredit:
+    """A credit line the parser could not turn into a Credit, kept so its money is still counted.
+
+    It carries a UTR that cannot exist in the books, so the landed check reports
+    it as missing, which is exactly what it is.
+    """
+    utr: str
+    amount: int
+    line: int
 
 
 class _DisjointSet:
@@ -143,9 +156,15 @@ def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         outcomes = [o for batch in executor.map(lambda g: _process(pool, inst, g), groups) for o in batch]
 
+    # Every credit line ends up in exactly one outcome, and the rupees are
+    # tracked alongside the counts so a caller can reconcile the file against
+    # what landed: recorded + repeated + lost == what the statement credited.
+    amount_of = {credit.line: credit.amount for credit in credits}
     counts = defaultdict(int)
+    rupees = defaultdict(int)
     for line, outcome, detail in outcomes:
         counts[outcome] += 1
+        rupees[outcome] += amount_of.get(line, 0)
         if outcome in ("conflict", "error"):
             problems.append({"line": line, "error": detail})
     reversed_count = _apply_reversals(pool, inst, reversals, problems)
@@ -158,6 +177,8 @@ def import_credits(pool, inst: int, credits: list[Credit], *, workers: int = 8, 
         "duplicates": counts["duplicate"],
         "conflicts": counts["conflict"],
         "errors": len(problems) - counts["conflict"],
+        "credit_rupees": {outcome: rupees[outcome] for outcome in
+                          ("matched", "needs_review", "duplicate", "conflict", "error")},
         "reversals": reversed_count,
         "skipped_debits": skipped_debits,
         "groups": len(groups),
@@ -175,9 +196,21 @@ def import_statement(pool, inst: int, text: str, *, workers: int = 8, account: s
     the file being silently trusted.
     """
     parsed = parse_statement(text)
+    check = check_continuity(parsed.rows)
     with pool.connection() as conn:
-        statement = record_statement(conn, inst, text, check_continuity(parsed.rows), len(parsed.rows),
-                                     account)
+        statement = record_statement(conn, inst, text, check, len(parsed.rows), account)
     summary = import_credits(pool, inst, parsed.credits, workers=workers, errors=parsed.errors,
                              skipped_debits=parsed.skipped_debits, reversals=parsed.reversals)
+
+    if not statement["already_imported"]:
+        # Ask the books whether every credit line the statement printed is there.
+        # A line the parser could not read never became a Credit, so its rupees
+        # are taken from the parsed ledger rows; a line whose amount itself was
+        # unreadable shows up instead as a break in the running balance.
+        unreadable = [UnparsedCredit(utr=f"line-{error['line']}", amount=row.credit, line=row.line)
+                      for row in parsed.rows if row.credit > 0
+                      for error in parsed.errors if error["line"] == row.line]
+        with pool.connection() as conn:
+            statement.update(check_credits_landed(conn, inst, statement["id"],
+                                                  list(parsed.credits) + unreadable))
     return {**summary, "bank": parsed.bank, "statement": statement}
