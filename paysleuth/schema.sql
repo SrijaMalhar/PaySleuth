@@ -233,6 +233,18 @@ CREATE TABLE IF NOT EXISTS approval_requests (
 CREATE UNIQUE INDEX IF NOT EXISTS approval_one_pending ON approval_requests (bank_credit_id)
     WHERE status = 'pending';
 
+-- What a person chose for a review-queue credit, next to what was suggested.
+-- This is the measured data the suggestion weights are tuned against.
+CREATE TABLE IF NOT EXISTS review_outcomes (
+    id              bigserial   PRIMARY KEY,
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    bank_credit_id  bigint      NOT NULL UNIQUE REFERENCES bank_credits(id),
+    chosen          jsonb       NOT NULL,     -- member ids the person assigned it to
+    rank_of_choice  integer,                  -- where the choice stood in the suggestions; NULL = not suggested
+    candidates      jsonb       NOT NULL,     -- [{member_id, signals: [...]}, ...] as ranked at the time
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE OR REPLACE FUNCTION forbid_change() RETURNS trigger LANGUAGE plpgsql AS $f$
 BEGIN
     RAISE EXCEPTION '% is append-only: insert a correction row instead of %', TG_TABLE_NAME, TG_OP
@@ -276,7 +288,7 @@ BEGIN
     FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
                              'bank_credits', 'payments', 'allocations', 'outbox',
                              'credit_reversals', 'statement_imports', 'alerts', 'daily_closes',
-                             'approval_requests'] LOOP
+                             'approval_requests', 'review_outcomes'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class

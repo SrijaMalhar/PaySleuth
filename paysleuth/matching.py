@@ -182,7 +182,7 @@ def _reasons(member: dict, credit: dict, fired: dict, owed: int, fee: int) -> li
     return reasons
 
 
-def suggest(conn, credit: dict, as_of: date, limit: int = 3, weights: dict | None = None) -> list[dict]:
+def suggest(conn, credit: dict, as_of: date, limit: int | None = 3, weights: dict | None = None) -> list[dict]:
     """Rank active members for a credit in the review queue. Read-only; never applied."""
     weights = weights or WEIGHTS
     members = conn.execute("SELECT id, ref_code, name, guardian_name FROM members WHERE active ORDER BY id"
@@ -201,6 +201,7 @@ def suggest(conn, credit: dict, as_of: date, limit: int = 3, weights: dict | Non
         if score > 0:
             ranked.append({"member_id": member["id"], "ref_code": member["ref_code"],
                            "name": member["name"], "score": score,
+                           "signals": [name for name, on in fired.items() if on],
                            "reasons": _reasons(member, credit, fired, owed[member["id"]], fee)})
     ranked.sort(key=lambda s: (-s["score"], s["member_id"]))      # ties stay stable
-    return ranked[:limit]
+    return ranked if limit is None else ranked[:limit]

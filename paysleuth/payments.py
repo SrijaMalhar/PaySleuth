@@ -12,6 +12,8 @@ on each other in a circle, so they cannot deadlock.
 
 import re
 
+from psycopg.types.json import Jsonb
+
 from . import audit, outbox
 from .allocation import LIVE, balances, settle_member
 from .db import lock_members, tenant_tx
@@ -185,6 +187,20 @@ def _learn_upi_id(conn, inst: int, upi_id: str | None, member_ids) -> None:
                      "VALUES (%s, %s, %s, 'learned') ON CONFLICT DO NOTHING", (inst, upi_id, member_id))
 
 
+def _record_outcome(conn, inst: int, credit_row: dict, parts: tuple) -> None:
+    """Keep what was suggested next to what the person chose, before the choice changes the balances."""
+    ranked = suggest(conn, credit_row, credit_row["received_at"].astimezone(IST).date(), limit=None)
+    chosen = [m for m, _ in parts]
+    ranks = [i for i, s in enumerate(ranked, start=1) if s["member_id"] in chosen]
+    candidates = [{"member_id": s["member_id"], "signals": s["signals"]} for s in ranked[:10]]
+    candidates += [{"member_id": m, "signals": []} for m in chosen
+                   if m not in {c["member_id"] for c in candidates}]
+    conn.execute(
+        "INSERT INTO review_outcomes (institution_id, bank_credit_id, chosen, rank_of_choice, candidates) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (bank_credit_id) DO NOTHING",
+        (inst, credit_row["id"], Jsonb(chosen), min(ranks) if ranks else None, Jsonb(candidates)))
+
+
 def split_credit(conn, inst: int, credit_id: int, parts, remember_upi_id: bool = True) -> dict:
     """Resolve a review-queue credit by saying which members it pays for, and how much each."""
     parts = _normalise_parts(parts)
@@ -198,6 +214,7 @@ def split_credit(conn, inst: int, credit_id: int, parts, remember_upi_id: bool =
                 return {"credit": credit_view(row), "duplicate": True, "applied": []}   # a retried click
             raise Conflict(f"bank credit {credit_id} is already assigned; use reassign to move it")
         lock_members(conn, [m for m, _ in parts])
+        _record_outcome(conn, inst, row, parts)
         row = conn.execute("UPDATE bank_credits SET status = 'matched', match_rule = 'manual' "
                            "WHERE id = %s RETURNING *", (credit_id,)).fetchone()
         if remember_upi_id:

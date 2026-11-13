@@ -7,6 +7,7 @@ statement with a real, anonymised export.
 
 import json
 import os
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -70,3 +71,20 @@ def test_an_unknown_layout_falls_back_to_the_generic_parser():
 def test_lines_are_numbered_as_in_the_file_even_after_a_preamble():
     text = (GOLDEN / "sbi.csv").read_text().replace('"2,000.00","52,000.00"', '"2,OOO.00","52,000.00"')
     assert [e["line"] for e in parse_statement(text).errors] == [10]
+
+
+def test_anonymising_a_statement_keeps_its_shape_and_removes_who_paid():
+    sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+    from anonymise_statement import anonymise
+
+    original = (GOLDEN.parent.parent / "sample_data" / "june_2026_statement.csv").read_text()
+    hidden = anonymise(original)
+    for secret in ("SUNITA", "VERMA", "LAKSHMI", "sunita.sharma", "615412345601", "meera", "GREEN LEAF"):
+        assert secret not in hidden, secret
+    assert "PS1004" in hidden and "fee" in hidden                  # reference codes and plain words stay
+    before, after = parse_statement(original), parse_statement(hidden)
+    assert [(c.amount, c.channel, c.received_at) for c in after.credits] == \
+        [(c.amount, c.channel, c.received_at) for c in before.credits]
+    assert after.credits[3].utr == after.credits[4].utr            # the repeated line still repeats
+    assert check_continuity(after.rows).status == "ok"
+    assert anonymise(original) == hidden                           # same input, same output

@@ -25,6 +25,7 @@ from .approvals import decide, list_approvals, request_reassign
 from .charges import apply_late_fees, run_billing
 from .close import list_statements, recent_closes, run_close
 from .db import make_pool, migrate
+from .evaluation import matching_report
 from .errors import Conflict, Forbidden, NotFound, PreconditionFailed, PreconditionRequired
 from .importer import import_statement
 from .institutions import actor_for_key, add_staff, deactivate_staff, list_staff
@@ -399,6 +400,10 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     def defaulters_report(min_days: int = Query(30, ge=0), as_of: date | None = None,
                           inst=Depends(institution), c=Depends(conn)):
         return defaulters(c, inst, as_of or today(), min_days)
+
+    @app.get("/reports/matching")
+    def matching(inst=Depends(institution), c=Depends(conn)):
+        return matching_report(c, inst, now())
 
     @app.get("/audit")
     def audit_log(limit: int = Query(100, ge=1, le=1000), inst=Depends(institution), c=Depends(conn)):
