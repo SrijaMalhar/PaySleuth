@@ -5,8 +5,8 @@
 #   uvicorn paysleuth.main:app &
 #   tools/demo.sh
 #
-# On a fresh database the members get ids 1 to 5, so the sample statement's
-# reference code (PS1004) lines up with the students created here.
+# Works against any database, empty or not: the students' reference codes are
+# read back from the API and the sample statement is rewritten to use them.
 set -euo pipefail
 
 API=${API:-http://localhost:8000}
@@ -23,7 +23,17 @@ echo "api key: ${KEY:0:7}..."
 call() { curl -sS -H "X-API-Key: $KEY" -H "Content-Type: application/json" "$@"; }
 
 say "Add five students (Rohan and Kabir are siblings sharing a parent's UPI ID)"
-add() { call -X POST "$API/members" -d "$1" | pick "d['ref_code'] + '  ' + d['name'] + '  Rs ' + d['monthly_fee']"; }
+# Each member's id and reference code are kept, so nothing below hardcodes either.
+declare -A CODE ID
+add() {
+  local line
+  line=$(call -X POST "$API/members" -d "$1" \
+           | pick "str(d['id']) + ' ' + d['ref_code'] + ' ' + d['name'] + ' Rs ' + d['monthly_fee']")
+  local first; first=$(echo "$line" | cut -d' ' -f3)
+  ID["$first"]=$(echo "$line" | cut -d' ' -f1)
+  CODE["$first"]=$(echo "$line" | cut -d' ' -f2)
+  echo "  ${line#* }"
+}
 add '{"name":"Diya Sharma","guardian_name":"Sunita Sharma","monthly_fee":"2000","billing_day":5,"start_period":"2026-06","upi_ids":["sunita.sharma@oksbi"]}'
 add '{"name":"Rohan Verma","guardian_name":"Rajesh Kumar Verma","monthly_fee":"2000","billing_day":5,"start_period":"2026-06","upi_ids":["rk.verma@okhdfcbank"]}'
 add '{"name":"Kabir Verma","guardian_name":"Rajesh Kumar Verma","monthly_fee":"1500","billing_day":5,"start_period":"2026-06","upi_ids":["rk.verma@okhdfcbank"]}'
@@ -34,8 +44,13 @@ say "Bill June"
 call -X POST "$API/billing/run?as_of=2026-06-01" | json
 
 say "Import the bank statement"
-curl -sS -H "X-API-Key: $KEY" -F "file=@sample_data/june_2026_statement.csv" "$API/bank-credits/import" \
-  | pick "{k: d[k] for k in ('recorded','matched','needs_review','duplicates','skipped_debits')}"
+# The sample statement names a reference code in one note. Point it at whoever
+# Arjun actually is here, so the demo reads the same on any database.
+STATEMENT=$(mktemp -t paysleuth_statement.XXXXXX.csv)
+trap 'rm -f "$STATEMENT"' EXIT
+sed "s/PS1004/${CODE[Arjun]}/" sample_data/june_2026_statement.csv > "$STATEMENT"
+curl -sS -H "X-API-Key: $KEY" -F "file=@$STATEMENT" "$API/bank-credits/import" \
+  | pick "{k: d[k] for k in ('recorded','matched','needs_review','duplicates','skipped_debits')} | {'statement': d['statement']['continuity'], 'follows': d['statement']['follows']}"
 
 say "Review queue: what could not be matched safely, with suggestions"
 REVIEW=$(call "$API/review")
@@ -49,8 +64,9 @@ for c in json.load(sys.stdin):
         print('    no suggestion')"
 
 say "Assign Lakshmi Iyer's transfer to the top suggestion (her UPI ID is remembered)"
-CREDIT=$(echo "$REVIEW" | pick "[c['id'] for c in d if c['suggestions']][0]")
-MEMBER=$(echo "$REVIEW" | pick "[c['suggestions'][0]['member_id'] for c in d if c['suggestions']][0]")
+# Pick her credit by payer, not by position: what else is in the queue may vary.
+CREDIT=$(echo "$REVIEW" | pick "[c['id'] for c in d if c['payer_upi_id'] == 'lakshmi.iyer@oksbi'][0]")
+MEMBER=$(echo "$REVIEW" | pick "[c['suggestions'][0]['member_id'] for c in d if c['payer_upi_id'] == 'lakshmi.iyer@oksbi'][0]")
 call -X POST "$API/review/$CREDIT/assign" -d "{\"member_id\": $MEMBER}" \
   | pick "d['credit']['utr'] + ' -> ' + d['applied'][0]['ref_code'] + ', matched by ' + d['credit']['match_rule']"
 
@@ -65,5 +81,8 @@ call "$API/reports/collection?period=2026-06" | json
 say "Deliver receipts"
 call -X POST "$API/outbox/relay" | json
 
+say "The daily close: is every credited rupee accounted for?"
+call -X POST "$API/close/run?day=2026-07-10" | json
+
 say "Meera's statement"
-call "$API/members/5/statement" | json
+call "$API/members/${ID[Meera]}/statement" | json

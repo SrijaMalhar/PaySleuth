@@ -167,7 +167,7 @@ def test_the_demo_seed_runs_and_leaves_a_believable_month(pool, capsys):
     assert seed_demo(["--database-url", f"{DSN}?options=-c%20search_path%3D{pool.schema}"]) == 0
     printed = capsys.readouterr().out
     assert "owner_api_key=ps_" in printed and "clerk_api_key=ps_" in printed
-    assert "3 matched automatically, 2 waiting for a person" in printed
+    assert "3 matched automatically, 2 waiting for a person" in printed   # 60% on the sample statement
     assert "statement continuity: ok" in printed and "daily close: clean" in printed
     with pool.connection() as conn:
         samples = collect(conn, NOW)

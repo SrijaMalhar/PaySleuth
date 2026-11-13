@@ -63,21 +63,21 @@ uvicorn paysleuth.main:app &       # API docs at http://localhost:8000/docs
 tools/demo.sh                      # or walk a month through the API from scratch
 ```
 
-Real output from the seeded demo's review queue, where two credits could not be matched safely:
+Of the sample statement's five credits, three match on their own (60%) and two cannot be matched
+safely. Real output from the seeded demo's review queue:
 
 ```
-Rs 1800.00 from ANIL NAIR: PS1004 june fee
-    70  PS1009 Arjun Nair: amount equals the Rs 1800.00 monthly fee; payer name matches Anil Nair;
-                           payer has the same surname
 Rs 2500.00 from LAKSHMI IYER: meera fees
-    75  PS1010 Meera Iyer: payer name matches Lakshmi Iyer; payer has the same surname;
-                           note mentions Meera
+     75  PS1005 Meera Iyer: payer name matches Lakshmi Iyer; payer has the same surname;
+                            note mentions Meera
 Rs 12000.00 from GREEN LEAF CAFE: rent june
-    15  PS1006 Diya Sharma: amount is exactly 6 months of fees
+     15  PS1001 Diya Sharma: amount is exactly 6 months of fees
+     15  PS1002 Rohan Verma: amount is exactly 6 months of fees
 ```
 
-Assigning the second one remembers `lakshmi.iyer@oksbi`, and July's transfer from the same payer
-matches by itself.
+The first is a parent whose UPI ID nobody registered; assigning it remembers `lakshmi.iyer@oksbi`, and
+July's transfer from her matches by itself. The second is the centre's rent coming in, and the two
+weak suggestions are what a 15-point amount coincidence looks like: the owner leaves it alone.
 
 ## How it works
 
