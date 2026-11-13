@@ -15,10 +15,10 @@ import re
 from psycopg.types.json import Jsonb
 
 from . import audit, outbox
-from .allocation import LIVE, balances, settle_member
+from .allocation import LIVE, balances_with_details, settle_members
 from .db import lock_members, tenant_tx
 from .errors import Conflict, NotFound
-from .matching import candidate_members, decide, suggest
+from .matching import candidate_members, decide, prepare, suggest
 from .members import normalise_upi_id
 from .money import to_rupees
 from .periods import IST, utc_now
@@ -63,26 +63,25 @@ def record_credit(conn, inst: int, credit: Credit) -> dict:
         members, source = candidate_members(conn, payer, credit.note)
         lock_members(conn, members)
 
-        # (3) The constraint is the guarantee. A second transaction inserting the
+        # (3) Decide while holding the locks, before the insert, so the credit row
+        # is written once with the status it ends up in.
+        decision = decide(conn, credit.amount, payer, credit.note, as_of, members=members, source=source)
+
+        # (4) The constraint is the guarantee. A second transaction inserting the
         # same UTR waits on the unique index until the first commits, then DO
         # NOTHING returns no row and we re-read the winner's row.
         row = conn.execute(
             """INSERT INTO bank_credits (institution_id, utr, channel, amount, payer_upi_id, payer_name,
-                                         note, narration, received_at, status)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'needs_review')
+                                         note, narration, received_at, status, match_rule)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (institution_id, utr) DO NOTHING RETURNING *""",
             (inst, utr, credit.channel, credit.amount, payer, credit.payer_name, credit.note,
-             credit.narration, credit.received_at)).fetchone()
+             credit.narration, credit.received_at,
+             "matched" if decision.parts else "needs_review", decision.rule)).fetchone()
         if row is None:
             return _replay(conn.execute("SELECT * FROM bank_credits WHERE utr = %s", (utr,)).fetchone(),
                            credit.amount)
-
-        decision = decide(conn, credit.amount, payer, credit.note, as_of, members=members, source=source)
-        applied = []
-        if decision.parts:
-            row = conn.execute("UPDATE bank_credits SET status = 'matched', match_rule = %s "
-                               "WHERE id = %s RETURNING *", (decision.rule, row["id"])).fetchone()
-            applied = _apply_parts(conn, inst, row, decision.parts)
+        applied = _apply_parts(conn, inst, row, decision.parts) if decision.parts else []
         return {"credit": credit_view(row), "duplicate": False, "applied": applied}
 
 
@@ -98,29 +97,38 @@ def _apply_parts(conn, inst: int, credit_row: dict, parts) -> list[dict]:
 
     The caller holds the members' locks. Payment and receipt commit together or not at all.
     """
-    applied = []
-    for member_id, amount in sorted(parts):
-        payment_id = conn.execute(
-            "INSERT INTO payments (institution_id, bank_credit_id, member_id, amount, received_at) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (inst, credit_row["id"], member_id, amount, credit_row["received_at"])).fetchone()["id"]
-        settled = settle_member(conn, inst, member_id)
+    parts = sorted(parts)
+    # One query each for the payments, the settling, the balances and the member
+    # details, whatever the number of siblings sharing the credit.
+    values = ", ".join(["(%s, %s, %s, %s, %s)"] * len(parts))
+    params = [v for member_id, amount in parts
+              for v in (inst, credit_row["id"], member_id, amount, credit_row["received_at"])]
+    payment_ids = {r["member_id"]: r["id"] for r in conn.execute(
+        f"INSERT INTO payments (institution_id, bank_credit_id, member_id, amount, received_at) "
+        f"VALUES {values} RETURNING id, member_id", params).fetchall()}
+    members = [member_id for member_id, _ in parts]
+    settled = settle_members(conn, inst, members)
+    after = balances_with_details(conn, members)
+
+    applied, receipts = [], []
+    for member_id, amount in parts:
+        payment_id = payment_ids[member_id]
+        member = after[member_id]
         covered = [{"period": a["period"], "kind": a["kind"], "amount": to_rupees(a["amount"])}
                    for a in settled if a["payment_id"] == payment_id]
-        after = balances(conn, [member_id])[member_id]
-        member = conn.execute("SELECT ref_code, name, phone FROM members WHERE id = %s",
-                              (member_id,)).fetchone()
         receipt = {
             "member_id": member_id, "ref_code": member["ref_code"], "member_name": member["name"],
             "phone": member["phone"], "utr": credit_row["utr"], "amount": to_rupees(amount),
             "received_at": credit_row["received_at"].astimezone(IST).isoformat(), "covered": covered,
-            "credit_after": to_rupees(after["credit"]), "outstanding_after": to_rupees(after["outstanding"]),
+            "credit_after": to_rupees(member["credit"]),
+            "outstanding_after": to_rupees(member["outstanding"]),
         }
-        outbox.enqueue(conn, inst, kind="payment_receipt", member_id=member_id, payload=receipt)
+        receipts.append((member_id, receipt))
         applied.append({"member_id": member_id, "ref_code": member["ref_code"], "payment_id": payment_id,
                         "amount": to_rupees(amount), "covered": covered,
                         "credit_after": receipt["credit_after"],
                         "outstanding_after": receipt["outstanding_after"]})
+    outbox.enqueue_many(conn, inst, kind="payment_receipt", rows=receipts)
     return applied
 
 
@@ -163,19 +171,24 @@ def void_payments(conn, inst: int, credit_id: int) -> list[int]:
     charge), then one negative payment row pointing at it. The caller holds the
     credit's and the members' locks. Returns the members affected.
     """
-    live = conn.execute(f"SELECT p.id, p.member_id, p.amount, p.received_at FROM payments p "
-                        f"WHERE p.bank_credit_id = %s AND {LIVE} ORDER BY p.id", (credit_id,)).fetchall()
-    for payment in live:
-        conn.execute(
-            """INSERT INTO allocations (institution_id, payment_id, charge_id, amount)
-               SELECT %s, payment_id, charge_id, -SUM(amount) FROM allocations
-                WHERE payment_id = %s GROUP BY payment_id, charge_id HAVING SUM(amount) <> 0""",
-            (inst, payment["id"]))
-        conn.execute(
-            "INSERT INTO payments (institution_id, bank_credit_id, member_id, amount, reverses_id, received_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (inst, credit_id, payment["member_id"], -payment["amount"], payment["id"], payment["received_at"]))
-    return sorted({p["member_id"] for p in live})
+    live = [r["id"] for r in conn.execute(
+        f"SELECT p.id FROM payments p WHERE p.bank_credit_id = %s AND {LIVE} ORDER BY p.id",
+        (credit_id,)).fetchall()]
+    if not live:
+        return []
+    # Two statements whatever the number of siblings. Both are INSERT ... SELECT,
+    # so the amounts come from the rows themselves and are never carried through
+    # Python, where a stale read could write back the wrong number.
+    conn.execute(
+        """INSERT INTO allocations (institution_id, payment_id, charge_id, amount)
+           SELECT %s, payment_id, charge_id, -SUM(amount) FROM allocations
+            WHERE payment_id = ANY(%s) GROUP BY payment_id, charge_id HAVING SUM(amount) <> 0""",
+        (inst, live))
+    members = conn.execute(
+        """INSERT INTO payments (institution_id, bank_credit_id, member_id, amount, reverses_id, received_at)
+           SELECT institution_id, bank_credit_id, member_id, -amount, id, received_at
+             FROM payments WHERE id = ANY(%s) ORDER BY id RETURNING member_id""", (live,)).fetchall()
+    return sorted({r["member_id"] for r in members})
 
 
 def _learn_upi_id(conn, inst: int, upi_id: str | None, member_ids) -> None:
@@ -257,9 +270,8 @@ def reassign_credit(conn, inst: int, credit_id: int, parts) -> dict:
         row = conn.execute("UPDATE bank_credits SET match_rule = 'manual' WHERE id = %s RETURNING *",
                            (credit_id,)).fetchone()
         applied = _apply_parts(conn, inst, row, parts)
-        for member_id in sorted(set(affected)):
-            # The old owner may have other unspent credit that can now pay what reopened.
-            settle_member(conn, inst, member_id)
+        # The old owner may have other unspent credit that can now pay what reopened.
+        settle_members(conn, inst, affected)
         audit.record(conn, inst, "credit.reassigned", "bank_credit", credit_id,
                      before=[list(p) for p in old], after=[list(p) for p in parts])
         return {"credit": credit_view(row), "changed": True, "applied": applied}
@@ -287,18 +299,19 @@ def reverse_credit(conn, inst: int, credit_id: int, *, reason: str | None = None
             (inst, credit_id, row["amount"], reference, reason, reversed_at or utc_now()))
         row = conn.execute("UPDATE bank_credits SET status = 'reversed' WHERE id = %s RETURNING *",
                            (credit_id,)).fetchone()
-        reopened = []
+        members = [m for m, _ in was]
+        settle_members(conn, inst, members)
+        after = balances_with_details(conn, members)
+        reopened, notices = [], []
         for member_id, amount in was:
-            settle_member(conn, inst, member_id)
-            after = balances(conn, [member_id])[member_id]
-            member = conn.execute("SELECT ref_code, name, phone FROM members WHERE id = %s",
-                                  (member_id,)).fetchone()
+            member = after[member_id]
             notice = {"member_id": member_id, "ref_code": member["ref_code"], "member_name": member["name"],
                       "phone": member["phone"], "utr": row["utr"], "amount": to_rupees(amount),
-                      "outstanding_after": to_rupees(after["outstanding"]),
-                      "credit_after": to_rupees(after["credit"])}
-            outbox.enqueue(conn, inst, kind="payment_reversed", member_id=member_id, payload=notice)
+                      "outstanding_after": to_rupees(member["outstanding"]),
+                      "credit_after": to_rupees(member["credit"])}
+            notices.append((member_id, notice))
             reopened.append({k: notice[k] for k in ("member_id", "ref_code", "amount", "outstanding_after")})
+        outbox.enqueue_many(conn, inst, kind="payment_reversed", rows=notices)
         audit.record(conn, inst, "credit.reversed", "bank_credit", credit_id,
                      was=[list(p) for p in was], reason=reason, reference=reference)
         return {"credit": credit_view(row), "duplicate": False, "reopened": reopened}
@@ -323,9 +336,19 @@ def get_credit(conn, inst: int, credit_id: int) -> dict:
                              "recorded_at": p["created_at"].isoformat()} for p in rows]}
 
 
-def review_queue(conn, inst: int, as_of) -> list[dict]:
-    """Every credit waiting for a person, oldest first, each with ranked suggestions."""
+def review_queue(conn, inst: int, as_of, limit: int = 50) -> list[dict]:
+    """The credits waiting for a person, oldest first, each with ranked suggestions.
+
+    The members, their dues, their fees and the payers' families are read once
+    for the page, not once per credit. The page is limited because every credit
+    on it is scored against every active member: a person works through a
+    queue a screenful at a time, and an unbounded page would make the slowest
+    institution the slowest request.
+    """
     with tenant_tx(conn, inst):
         rows = conn.execute("SELECT * FROM bank_credits WHERE status = 'needs_review' "
-                            "ORDER BY received_at, id").fetchall()
-        return [{**credit_view(r), "suggestions": suggest(conn, r, as_of)} for r in rows]
+                            "ORDER BY received_at, id LIMIT %s", (limit,)).fetchall()
+        if not rows:
+            return []
+        prepared = prepare(conn, as_of, [r["payer_upi_id"] for r in rows])
+        return [{**credit_view(r), "suggestions": suggest(conn, r, as_of, prepared=prepared)} for r in rows]

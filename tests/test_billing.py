@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from conftest import add_member, charges_of, credit, money
-from paysleuth.allocation import settle_member
+from paysleuth.allocation import settle_members
 from paysleuth.charges import apply_late_fees, bill_member, concession_amount, run_billing
 from paysleuth.db import lock_members, tenant_tx
 from paysleuth.errors import Conflict, PreconditionFailed
@@ -129,7 +129,7 @@ def _raw_payment(conn, inst, member_id, amount, utr="UTR000000001"):
                      "VALUES (%s, %s, %s, %s, %s)",
                      (inst, credit, member_id, amount, datetime(2026, 6, 10, tzinfo=timezone.utc)))
         lock_members(conn, [member_id])
-        return settle_member(conn, inst, member_id)
+        return settle_members(conn, inst, [member_id])
 
 
 def test_settle_pays_the_oldest_charge_first(conn, inst):

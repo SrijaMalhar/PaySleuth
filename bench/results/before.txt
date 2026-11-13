@@ -1,0 +1,36 @@
+# Before the performance pass (commit 7c01c23), same machine.
+
+## Queries and time per credit
+
+case                                queries  median ms  slowest ms
+one member, by reference code            13        3.3         8.2
+two siblings, split by dues              22        3.7        11.3
+unknown payer, straight to review         4        1.0         2.6
+
+## Import scaling and lock granularity
+
+machine: x86_64, 2 cores, Python 3.12.3
+
+import scaling: 4675 statement lines, 500 members, 694 groups
+workers  seconds  lines/s speed-up  fingerprint
+      1     14.3      328    1.00x  1c0a9b351413
+      2      9.3      504    1.54x  1c0a9b351413
+      4      9.4      496    1.51x  1c0a9b351413
+      8     12.1      387    1.18x  1c0a9b351413
+fingerprints identical
+
+lock granularity: 8 threads x 100 transfers
+  different members    303.7 transfers/s
+  one member           190.3 transfers/s
+
+## API latency, 8 clients, 300 members, 25s (the review queue was unpaged)
+
+endpoint                              n   p50 ms   p95 ms   p99 ms   max ms
+GET /members/{id}/statement          82       75      134      155      169
+GET /reports/ageing                  73      116      170      184      198
+GET /reports/collection              57      119      228      244      246
+GET /review                          67     2057     3976     4124     4316
+POST /bank-credits                  311       99      169      197      251
+POST /bank-credits (split)          107       89      169      200      215
+
+697 requests, 26/s

@@ -299,8 +299,8 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     # review queue
 
     @app.get("/review")
-    def review(inst=Depends(institution), c=Depends(conn)):
-        return review_queue(c, inst, today())
+    def review(limit: int = Query(50, ge=1, le=200), inst=Depends(institution), c=Depends(conn)):
+        return review_queue(c, inst, today(), limit)
 
     @app.post("/review/{credit_id}/assign")
     def assign(credit_id: int, body: AssignIn, inst=Depends(institution), c=Depends(conn)):

@@ -43,6 +43,25 @@ def enqueue(conn, inst: int, *, kind: str, member_id: int, payload: dict, charge
     return message_id if row else None
 
 
+def enqueue_many(conn, inst: int, *, kind: str, rows) -> list[str]:
+    """Queue several messages of one kind in one INSERT, inside the caller's transaction.
+
+    For messages with no dedupe key, such as receipts: a sibling split queues
+    one per child, and there is no reason for a round trip each.
+    """
+    rows = list(rows)
+    if not rows:
+        return []
+    message_ids = [str(uuid.uuid4()) for _ in rows]
+    values = ", ".join(["(%s, %s, %s, %s, %s)"] * len(rows))
+    params = [v for (member_id, payload), message_id in zip(rows, message_ids)
+              for v in (inst, message_id, kind, member_id,
+                        Jsonb({"message_id": message_id, "kind": kind, **payload}))]
+    conn.execute(f"INSERT INTO outbox (institution_id, message_id, kind, member_id, payload) "
+                 f"VALUES {values}", params)
+    return message_ids
+
+
 def backoff(attempts: int) -> timedelta:
     """5, 10, 20, 40 ... seconds, capped at an hour."""
     return timedelta(seconds=min(5 * 2 ** (attempts - 1), 3600))

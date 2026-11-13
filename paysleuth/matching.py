@@ -114,22 +114,33 @@ WEIGHTS = {
 }
 
 
-def _family_of(conn, payer_upi_id: str | None) -> set[int]:
-    """Members this UPI ID already pays for, and their siblings (same guardian or a shared UPI ID)."""
-    if not payer_upi_id:
-        return set()
+def families_of(conn, payer_upi_ids) -> dict[str, set[int]]:
+    """For each UPI ID: the members it already pays for, and their siblings.
+
+    Siblings are members sharing a UPI ID with one of those, or having the same
+    guardian name. One query for the whole review queue, not one per credit.
+    """
+    wanted = sorted({u for u in payer_upi_ids if u})
+    if not wanted:
+        return {}
     rows = conn.execute(
-        """WITH direct AS (SELECT member_id FROM member_upi_ids WHERE upi_id = %(u)s),
-                linked AS (SELECT u2.member_id FROM member_upi_ids u1
-                             JOIN member_upi_ids u2 ON u2.upi_id = u1.upi_id
-                            WHERE u1.member_id IN (SELECT member_id FROM direct))
-           SELECT member_id AS id FROM direct
-           UNION SELECT member_id FROM linked
-           UNION SELECT m2.id FROM members m1 JOIN members m2
-                    ON lower(m2.guardian_name) = lower(m1.guardian_name)
-                 WHERE m1.id IN (SELECT member_id FROM direct) AND m1.guardian_name IS NOT NULL""",
-        {"u": payer_upi_id}).fetchall()
-    return {r["id"] for r in rows}
+        """WITH wanted AS (SELECT unnest(%(upis)s::text[]) AS upi_id),
+                direct AS (SELECT w.upi_id, u.member_id FROM wanted w
+                             JOIN member_upi_ids u ON u.upi_id = w.upi_id),
+                linked AS (SELECT d.upi_id, u2.member_id FROM direct d
+                             JOIN member_upi_ids u1 ON u1.member_id = d.member_id
+                             JOIN member_upi_ids u2 ON u2.upi_id = u1.upi_id),
+                same_guardian AS (SELECT d.upi_id, m2.id AS member_id FROM direct d
+                                    JOIN members m1 ON m1.id = d.member_id
+                                    JOIN members m2 ON lower(m2.guardian_name) = lower(m1.guardian_name)
+                                   WHERE m1.guardian_name IS NOT NULL)
+           SELECT upi_id, member_id FROM direct
+           UNION SELECT upi_id, member_id FROM linked
+           UNION SELECT upi_id, member_id FROM same_guardian""", {"upis": wanted}).fetchall()
+    families: dict[str, set[int]] = {u: set() for u in wanted}
+    for row in rows:
+        families[row["upi_id"]].add(row["member_id"])
+    return families
 
 
 def signals(member: dict, credit: dict, owed: int, fee: int, family: set[int]) -> dict[str, bool]:
@@ -182,19 +193,41 @@ def _reasons(member: dict, credit: dict, fired: dict, owed: int, fee: int) -> li
     return reasons
 
 
-def suggest(conn, credit: dict, as_of: date, limit: int | None = 3, weights: dict | None = None) -> list[dict]:
-    """Rank active members for a credit in the review queue. Read-only; never applied."""
-    weights = weights or WEIGHTS
+@dataclass(frozen=True)
+class Suggesting:
+    """Everything suggest() needs that does not depend on the individual credit.
+
+    Four queries, built once for a whole review queue instead of once per
+    credit: with 300 members and 50 waiting credits, that is the difference
+    between 4 queries and 200.
+    """
+    members: tuple
+    owed: dict
+    fees: dict
+    families: dict
+
+
+def prepare(conn, as_of: date, payer_upi_ids=()) -> Suggesting:
     members = conn.execute("SELECT id, ref_code, name, guardian_name FROM members WHERE active ORDER BY id"
                            ).fetchall()
-    if not members:
-        return []
     ids = [m["id"] for m in members]
-    owed = {m: b["outstanding"] for m, b in balances(conn, ids).items()}
-    fees = current_fees(conn, ids, as_of)
-    family = _family_of(conn, credit.get("payer_upi_id"))
+    return Suggesting(members=tuple(members),
+                      owed={m: b["outstanding"] for m, b in balances(conn, ids).items()} if ids else {},
+                      fees=current_fees(conn, ids, as_of) if ids else {},
+                      families=families_of(conn, payer_upi_ids))
+
+
+def suggest(conn, credit: dict, as_of: date, limit: int | None = 3, weights: dict | None = None,
+            prepared: Suggesting | None = None) -> list[dict]:
+    """Rank active members for a credit in the review queue. Read-only; never applied."""
+    weights = weights or WEIGHTS
+    data = prepared or prepare(conn, as_of, [credit.get("payer_upi_id")])
+    if not data.members:
+        return []
+    owed, fees = data.owed, data.fees
+    family = data.families.get(credit.get("payer_upi_id"), set())
     ranked = []
-    for member in members:
+    for member in data.members:
         fee = fees[member["id"]]
         fired = signals(member, credit, owed[member["id"]], fee, family)
         score = sum(weights[name] for name, on in fired.items() if on)

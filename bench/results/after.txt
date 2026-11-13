@@ -1,0 +1,39 @@
+# Measured on a 2-core x86_64 cloud VM, PostgreSQL 16 on the same machine.
+
+## Queries and time per credit (bench/query_count.py)
+
+case                                queries  median ms  slowest ms
+one member, by reference code            11        3.8        16.9
+two siblings, split by dues              13        3.1        10.8
+unknown payer, straight to review         4        0.8         2.6
+
+
+## Import scaling and lock granularity (bench/benchmark.py)
+
+machine: x86_64, 2 cores, Python 3.12.3
+
+import scaling: 4675 statement lines, 500 members, 694 groups
+workers  seconds  lines/s speed-up  fingerprint
+      1     18.9      247    1.00x  1c0a9b351413
+      2     11.3      413    1.67x  1c0a9b351413
+      4     10.1      463    1.87x  1c0a9b351413
+      8     10.0      467    1.89x  1c0a9b351413
+fingerprints identical
+
+lock granularity: 8 threads x 100 transfers
+  different members    503.1 transfers/s
+  one member           164.3 transfers/s
+
+## API latency, 8 clients for 60s (bench/load_api.py)
+
+8 clients, 500 members, 61s: 2686 requests, 44/s
+
+endpoint                              n   p50 ms   p95 ms   p99 ms   max ms
+GET /members/{id}/statement         270       57      311      427      607
+GET /reports/ageing                 269      173      408      517      656
+GET /reports/collection             272      195      548      690      837
+GET /review                         279      455      794     1126     1188
+POST /bank-credits                 1211       80      370      563     1057
+POST /bank-credits (split)          385       67      335      447      612
+
+no errors
