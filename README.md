@@ -30,7 +30,7 @@ refuse rather than guess.
 
 | | |
 |---|---|
-| **343 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **345 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
 | **22/22 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
 | **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
 | **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence is tested at 1, 4, 8 and 16 workers |
@@ -423,7 +423,7 @@ Refused, with reasons I would defend:
 
 ## How correctness is established
 
-Five layers, each catching what the one above cannot. 343 tests, none mocked — every one runs against a
+Five layers, each catching what the one above cannot. 345 tests, none mocked — every one runs against a
 real PostgreSQL in its own schema, because locks, constraints and row-level security are the subject.
 
 **1. Unit and integration tests** — the cases I thought of. 19 files; `test_reports.py` is worth
