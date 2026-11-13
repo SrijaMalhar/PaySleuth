@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import date, datetime
 
 import pytest
+from psycopg.errors import RestrictViolation, UniqueViolation
 
 from conftest import add_member, charges_of, credit, money, receipts
 from paysleuth.charges import run_billing
@@ -9,7 +10,8 @@ from paysleuth.db import tenant_tx
 from paysleuth.errors import Conflict, NotFound
 from paysleuth.institutions import create_institution
 from paysleuth.members import get_member
-from paysleuth.payments import assign_credit, reassign_credit, record_credit, review_queue, split_credit
+from paysleuth.payments import (assign_credit, get_credit, reassign_credit, record_credit, review_queue,
+                                split_credit)
 from paysleuth.periods import IST
 
 JUNE = date(2026, 6, 1)
@@ -283,10 +285,52 @@ def test_a_payment_can_return_to_a_charge_it_already_part_paid(conn, inst):
     # payment away sends the second back to the June charge it already part-paid.
     reassign_credit(conn, inst, p1, [(kabir, 150000)])
     assert [c["paid"] for c in charges_of(conn, inst, diya)] == [100000]
+    assert money(conn, inst, diya) == {"billed": 200000, "paid": 100000, "outstanding": 100000, "credit": 0}
+
+
+# --- append-only history ---------------------------------------------------------------
+
+def test_reassigning_writes_correction_rows_and_deletes_nothing(conn, inst):
+    diya = add_member(conn, inst)
+    kabir = add_member(conn, inst, "Kabir")
+    run_billing(conn, inst, JUNE)
+    credit_id = record_credit(conn, inst, credit(note=code(diya)))["credit"]["id"]
+    reassign_credit(conn, inst, credit_id, [(kabir, 200000)])
+    reassign_credit(conn, inst, credit_id, [(diya, 200000)])          # and back again
     with tenant_tx(conn, inst):
-        rows = conn.execute("SELECT COUNT(*) AS n FROM allocations a JOIN payments p ON p.id = a.payment_id "
-                            "WHERE p.member_id = %s", (diya,)).fetchone()
-    assert rows["n"] == 1
+        payments = conn.execute("SELECT member_id, amount, reverses_id IS NOT NULL AS correction "
+                                "FROM payments ORDER BY id").fetchall()
+        allocations = [r["amount"] for r in conn.execute("SELECT amount FROM allocations ORDER BY id")]
+    assert [(p["member_id"], p["amount"], p["correction"]) for p in payments] == [
+        (diya, 200000, False), (diya, -200000, True), (kabir, 200000, False),
+        (kabir, -200000, True), (diya, 200000, False)]
+    assert allocations == [200000, -200000, 200000, -200000, 200000]
+    view = get_credit(conn, inst, credit_id)
+    assert view["parts"] == [{"member_id": diya, "ref_code": code(diya), "amount": "2000.00"}]
+    assert len(view["history"]) == 5 and view["history"][1]["corrects_payment_id"] == view["history"][0]["payment_id"]
+    assert money(conn, inst, diya)["outstanding"] == 0 and money(conn, inst, kabir)["outstanding"] == 200000
+
+
+@pytest.mark.parametrize("table", ["payments", "allocations"])
+@pytest.mark.parametrize("statement", ["DELETE FROM {}", "UPDATE {} SET amount = amount + 1"])
+def test_the_database_refuses_to_change_or_delete_money_rows(conn, inst, table, statement):
+    diya = add_member(conn, inst)
+    run_billing(conn, inst, JUNE)
+    record_credit(conn, inst, credit(note=code(diya)))
+    with pytest.raises(RestrictViolation, match="append-only"):
+        with tenant_tx(conn, inst):
+            conn.execute(statement.format(table))
+
+
+def test_a_payment_can_be_voided_only_once(conn, inst):
+    diya = add_member(conn, inst)
+    record_credit(conn, inst, credit(note=code(diya)))
+    with pytest.raises(UniqueViolation):
+        with tenant_tx(conn, inst):
+            for _ in range(2):
+                conn.execute("INSERT INTO payments (institution_id, bank_credit_id, member_id, amount, "
+                             "reverses_id, received_at) SELECT institution_id, bank_credit_id, member_id, "
+                             "-amount, id, received_at FROM payments WHERE reverses_id IS NULL")
 
 
 def test_siblings_paying_before_they_start_split_by_their_first_fees(conn, inst):

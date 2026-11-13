@@ -1,5 +1,8 @@
 """Applying money to what is owed, oldest due date first."""
 
+# A payment that has not been taken back: not a correction row, and no correction row points at it.
+LIVE = "p.reverses_id IS NULL AND NOT EXISTS (SELECT 1 FROM payments v WHERE v.reverses_id = p.id)"
+
 
 def settle_member(conn, inst: int, member_id: int) -> list[dict]:
     """Apply unspent money to unpaid charges, oldest due date first.
@@ -9,9 +12,9 @@ def settle_member(conn, inst: int, member_id: int) -> list[dict]:
     whichever pointer reached zero. O(P + C) after the two queries.
     """
     payments = conn.execute(
-        """SELECT p.id, p.amount - COALESCE(SUM(a.amount), 0) AS unspent
+        f"""SELECT p.id, p.amount - COALESCE(SUM(a.amount), 0) AS unspent
              FROM payments p LEFT JOIN allocations a ON a.payment_id = p.id
-            WHERE p.member_id = %s GROUP BY p.id
+            WHERE p.member_id = %s AND {LIVE} GROUP BY p.id
            HAVING p.amount - COALESCE(SUM(a.amount), 0) > 0
             ORDER BY p.received_at, p.id""", (member_id,)).fetchall()
     if not payments:
@@ -28,13 +31,11 @@ def settle_member(conn, inst: int, member_id: int) -> list[dict]:
     unpaid = [c["unpaid"] for c in charges]
     while pi < len(payments) and ci < len(charges):
         amount = min(unspent[pi], unpaid[ci])
-        # DO UPDATE, not DO NOTHING: after a payment is moved away, another
-        # payment of the same member can return to a charge it already part-paid.
+        # Always a new row. A payment can come back to a charge it part-paid
+        # earlier (after another payment is moved away); that is simply a
+        # second row, and every reader sums.
         conn.execute(
-            """INSERT INTO allocations (institution_id, payment_id, charge_id, amount)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT (payment_id, charge_id)
-               DO UPDATE SET amount = allocations.amount + EXCLUDED.amount""",
+            "INSERT INTO allocations (institution_id, payment_id, charge_id, amount) VALUES (%s, %s, %s, %s)",
             (inst, payments[pi]["id"], charges[ci]["id"], amount))
         created.append({"payment_id": payments[pi]["id"], "charge_id": charges[ci]["id"],
                         "period": charges[ci]["period"], "kind": charges[ci]["kind"],

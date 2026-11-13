@@ -13,7 +13,7 @@ on each other in a circle, so they cannot deadlock.
 import re
 
 from . import audit, outbox
-from .allocation import balances, settle_member
+from .allocation import LIVE, balances, settle_member
 from .db import lock_members, tenant_tx
 from .errors import Conflict, NotFound
 from .matching import candidate_members, decide, suggest
@@ -149,9 +149,31 @@ def _check_parts(parts: tuple, total: int) -> None:
 
 
 def _current_parts(conn, credit_id: int) -> tuple:
-    rows = conn.execute("SELECT member_id, amount FROM payments WHERE bank_credit_id = %s ORDER BY member_id",
-                        (credit_id,)).fetchall()
+    rows = conn.execute(f"SELECT p.member_id, p.amount FROM payments p WHERE p.bank_credit_id = %s "
+                        f"AND {LIVE} ORDER BY p.member_id", (credit_id,)).fetchall()
     return tuple((r["member_id"], r["amount"]) for r in rows)
+
+
+def void_payments(conn, inst: int, credit_id: int) -> list[int]:
+    """Take back every live payment of a credit by inserting correction rows. Nothing is deleted.
+
+    For each payment: one negative allocation per charge it paid (reopening the
+    charge), then one negative payment row pointing at it. The caller holds the
+    credit's and the members' locks. Returns the members affected.
+    """
+    live = conn.execute(f"SELECT p.id, p.member_id, p.amount, p.received_at FROM payments p "
+                        f"WHERE p.bank_credit_id = %s AND {LIVE} ORDER BY p.id", (credit_id,)).fetchall()
+    for payment in live:
+        conn.execute(
+            """INSERT INTO allocations (institution_id, payment_id, charge_id, amount)
+               SELECT %s, payment_id, charge_id, -SUM(amount) FROM allocations
+                WHERE payment_id = %s GROUP BY payment_id, charge_id HAVING SUM(amount) <> 0""",
+            (inst, payment["id"]))
+        conn.execute(
+            "INSERT INTO payments (institution_id, bank_credit_id, member_id, amount, reverses_id, received_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (inst, credit_id, payment["member_id"], -payment["amount"], payment["id"], payment["received_at"]))
+    return sorted({p["member_id"] for p in live})
 
 
 def _learn_upi_id(conn, inst: int, upi_id: str | None, member_ids) -> None:
@@ -210,9 +232,7 @@ def reassign_credit(conn, inst: int, credit_id: int, parts) -> dict:
             return {"credit": credit_view(row), "changed": False, "applied": []}
         affected = [m for m, _ in old] + [m for m, _ in parts]       # "from", then "to"...
         lock_members(conn, affected)                                  # ...but locked in id order
-        conn.execute("DELETE FROM allocations WHERE payment_id IN "
-                     "(SELECT id FROM payments WHERE bank_credit_id = %s)", (credit_id,))
-        conn.execute("DELETE FROM payments WHERE bank_credit_id = %s", (credit_id,))
+        void_payments(conn, inst, credit_id)           # correction rows, not deletes
         row = conn.execute("UPDATE bank_credits SET match_rule = 'manual' WHERE id = %s RETURNING *",
                            (credit_id,)).fetchone()
         applied = _apply_parts(conn, inst, row, parts)
@@ -229,12 +249,18 @@ def get_credit(conn, inst: int, credit_id: int) -> dict:
         row = conn.execute("SELECT * FROM bank_credits WHERE id = %s", (credit_id,)).fetchone()
         if row is None:
             raise NotFound(f"bank credit {credit_id} not found")
-        parts = conn.execute(
-            """SELECT p.member_id, m.ref_code, p.amount FROM payments p JOIN members m ON m.id = p.member_id
-                WHERE p.bank_credit_id = %s ORDER BY p.member_id""", (credit_id,)).fetchall()
+        rows = conn.execute(
+            f"""SELECT p.id, p.member_id, m.ref_code, p.amount, p.reverses_id, p.created_at, {LIVE} AS live
+                  FROM payments p JOIN members m ON m.id = p.member_id
+                 WHERE p.bank_credit_id = %s ORDER BY p.id""", (credit_id,)).fetchall()
         return {**credit_view(row),
                 "parts": [{"member_id": p["member_id"], "ref_code": p["ref_code"],
-                           "amount": to_rupees(p["amount"])} for p in parts]}
+                           "amount": to_rupees(p["amount"])}
+                          for p in sorted(rows, key=lambda r: r["member_id"]) if p["live"]],
+                # Every row ever written for this credit, corrections included.
+                "history": [{"payment_id": p["id"], "member_id": p["member_id"], "ref_code": p["ref_code"],
+                             "amount": to_rupees(p["amount"]), "corrects_payment_id": p["reverses_id"],
+                             "recorded_at": p["created_at"].isoformat()} for p in rows]}
 
 
 def review_queue(conn, inst: int, as_of) -> list[dict]:

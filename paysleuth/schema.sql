@@ -104,29 +104,44 @@ CREATE TABLE IF NOT EXISTS bank_credits (
 CREATE INDEX IF NOT EXISTS bank_credits_queue ON bank_credits (institution_id, status, received_at);
 
 -- The share of one bank credit that belongs to one member.
+--
+-- payments and allocations are append-only: triggers below refuse UPDATE and
+-- DELETE. Money is taken back by inserting a correction row with a negative
+-- amount, so every sum still works and no money record is ever lost. A
+-- payment with a correction row pointing at it is "voided"; the unique index
+-- means it can be voided only once.
 CREATE TABLE IF NOT EXISTS payments (
     id              bigserial   PRIMARY KEY,
     institution_id  bigint      NOT NULL REFERENCES institutions(id),
     bank_credit_id  bigint      NOT NULL REFERENCES bank_credits(id),
     member_id       bigint      NOT NULL REFERENCES members(id),
-    amount          bigint      NOT NULL CHECK (amount > 0),
+    amount          bigint      NOT NULL CHECK (amount <> 0),
+    reverses_id     bigint      REFERENCES payments(id),      -- set on a correction row
     received_at     timestamptz NOT NULL,
     created_at      timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (bank_credit_id, member_id)
+    CHECK ((reverses_id IS NULL) = (amount > 0))
 );
 CREATE INDEX IF NOT EXISTS payments_member ON payments (member_id, received_at, id);
+CREATE INDEX IF NOT EXISTS payments_credit ON payments (bank_credit_id);
+CREATE UNIQUE INDEX IF NOT EXISTS payments_voided_once ON payments (reverses_id) WHERE reverses_id IS NOT NULL;
 
--- How much of a payment went to a charge. One running total per pair.
+-- How much of a payment went to a charge. Negative rows take an allocation back.
 CREATE TABLE IF NOT EXISTS allocations (
     id              bigserial   PRIMARY KEY,
     institution_id  bigint      NOT NULL REFERENCES institutions(id),
     payment_id      bigint      NOT NULL REFERENCES payments(id),
     charge_id       bigint      NOT NULL REFERENCES charges(id),
-    amount          bigint      NOT NULL CHECK (amount > 0),
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (payment_id, charge_id)
+    amount          bigint      NOT NULL CHECK (amount <> 0),
+    created_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS allocations_charge ON allocations (charge_id);
+CREATE INDEX IF NOT EXISTS allocations_payment ON allocations (payment_id);
+
+CREATE OR REPLACE FUNCTION forbid_change() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    RAISE EXCEPTION '% is append-only: insert a correction row instead of %', TG_TABLE_NAME, TG_OP
+          USING ERRCODE = 'restrict_violation';
+END $f$;
 
 -- Transactional outbox: a message is inserted in the same transaction as the
 -- change it reports, and workers deliver it afterwards.
@@ -176,6 +191,14 @@ BEGIN
             EXECUTE format($p$CREATE POLICY tenant_isolation ON %I
                 USING (institution_id = NULLIF(current_setting('app.institution_id', true), '')::bigint)
                 WITH CHECK (institution_id = NULLIF(current_setting('app.institution_id', true), '')::bigint)$p$, t);
+        END IF;
+    END LOOP;
+
+    FOREACH t IN ARRAY ARRAY['payments', 'allocations'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'append_only'
+                         AND tgrelid = format('%I', t)::regclass) THEN
+            EXECUTE format('CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON %I '
+                           'FOR EACH ROW EXECUTE FUNCTION forbid_change()', t);
         END IF;
     END LOOP;
 END $$;

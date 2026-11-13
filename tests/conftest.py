@@ -152,10 +152,12 @@ def check_books(conn, inst) -> list[str]:
                            FROM bank_credits b LEFT JOIN payments p ON p.bank_credit_id = b.id
                           GROUP BY b.id
                          HAVING (b.status = 'matched' AND COALESCE(SUM(p.amount), 0) <> b.amount)
-                             OR (b.status = 'needs_review' AND COUNT(p.id) > 0)"""):
+                             OR (b.status <> 'matched' AND COALESCE(SUM(p.amount), 0) <> 0)"""):
             broken.append(f"credit {r['id']} ({r['status']}) of {r['amount']} has {r['applied']} applied")
         for r in rows("""WITH unspent AS (
                              SELECT p.member_id FROM payments p LEFT JOIN allocations a ON a.payment_id = p.id
+                              WHERE p.reverses_id IS NULL
+                                AND NOT EXISTS (SELECT 1 FROM payments v WHERE v.reverses_id = p.id)
                               GROUP BY p.id HAVING p.amount - COALESCE(SUM(a.amount), 0) > 0),
                            unpaid AS (
                              SELECT c.member_id FROM charges c LEFT JOIN allocations a ON a.charge_id = c.id
@@ -165,4 +167,14 @@ def check_books(conn, inst) -> list[str]:
         for r in rows("""SELECT member_id, period, kind FROM charges GROUP BY member_id, period, kind
                          HAVING COUNT(*) > 1"""):
             broken.append(f"member {r['member_id']} billed twice for {r['period']} {r['kind']}")
+        for r in rows("""SELECT p.id FROM payments p LEFT JOIN allocations a ON a.payment_id = p.id
+                          WHERE p.reverses_id IS NOT NULL
+                             OR EXISTS (SELECT 1 FROM payments v WHERE v.reverses_id = p.id)
+                          GROUP BY p.id HAVING COALESCE(SUM(a.amount), 0) <> 0"""):
+            broken.append(f"voided payment {r['id']} still pays for something")
+        for r in rows("""SELECT p.bank_credit_id, p.member_id FROM payments p
+                          WHERE p.reverses_id IS NULL
+                            AND NOT EXISTS (SELECT 1 FROM payments v WHERE v.reverses_id = p.id)
+                          GROUP BY p.bank_credit_id, p.member_id HAVING COUNT(*) > 1"""):
+            broken.append(f"credit {r['bank_credit_id']} has two live payments for member {r['member_id']}")
     return broken

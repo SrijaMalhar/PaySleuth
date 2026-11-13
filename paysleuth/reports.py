@@ -6,7 +6,7 @@ never from a stored balance.
 
 from datetime import date
 
-from .allocation import balances
+from .allocation import LIVE, balances
 from .db import tenant_tx
 from .errors import NotFound
 from .money import to_rupees
@@ -33,9 +33,10 @@ def statement(conn, inst: int, member_id: int, today: date) -> dict:
                  FROM charges c LEFT JOIN allocations a ON a.charge_id = c.id
                 WHERE c.member_id = %s GROUP BY c.id ORDER BY c.due_date, c.id""", (member_id,)).fetchall()
         payments = conn.execute(
-            """SELECT b.utr, b.channel, b.match_rule, p.amount, p.received_at
-                 FROM payments p JOIN bank_credits b ON b.id = p.bank_credit_id
-                WHERE p.member_id = %s ORDER BY p.received_at, p.id""", (member_id,)).fetchall()
+            f"""SELECT b.utr, b.channel, b.match_rule, p.amount, p.received_at
+                  FROM payments p JOIN bank_credits b ON b.id = p.bank_credit_id
+                 WHERE p.member_id = %s AND {LIVE} ORDER BY p.received_at, p.id""",
+            (member_id,)).fetchall()
         totals = balances(conn, [member_id])[member_id]
 
     lines = []

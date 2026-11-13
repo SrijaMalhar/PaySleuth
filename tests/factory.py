@@ -134,8 +134,9 @@ def books(conn, inst) -> dict:
         credits = conn.execute(
             "SELECT utr, amount, status, match_rule FROM bank_credits ORDER BY utr").fetchall()
         payments = conn.execute(
-            """SELECT b.utr, m.ref_code, p.amount FROM payments p
+            """SELECT b.utr, m.ref_code, SUM(p.amount) AS amount FROM payments p
                  JOIN bank_credits b ON b.id = p.bank_credit_id JOIN members m ON m.id = p.member_id
+                GROUP BY b.utr, m.ref_code HAVING SUM(p.amount) <> 0
                 ORDER BY b.utr, m.ref_code""").fetchall()
         allocations = conn.execute(
             """SELECT b.utr, m.ref_code, c.period, c.kind, SUM(a.amount) AS amount

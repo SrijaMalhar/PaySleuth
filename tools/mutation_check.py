@@ -72,6 +72,10 @@ MUTATIONS = [
              (("            for member_id in members:\n                sets.union(node, (\"member\", member_id))",
                "            if members:\n                sets.union(node, (\"member\", members[0]))"),),
              "tests/test_import.py::test_parallel_import_gives_exactly_the_books_of_a_serial_import"),
+    Mutation("append-only triggers removed", "paysleuth/schema.sql",
+             (("            EXECUTE format('CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON %I '\n"
+               "                           'FOR EACH ROW EXECUTE FUNCTION forbid_change()', t);", "            NULL;"),),
+             "tests/test_payments.py::test_the_database_refuses_to_change_or_delete_money_rows"),
 ]
 
 
