@@ -36,7 +36,7 @@ def credit_view(row: dict) -> dict:
     return {
         "id": row["id"], "utr": row["utr"], "channel": row["channel"], "amount": to_rupees(row["amount"]),
         "payer_upi_id": row["payer_upi_id"], "payer_name": row["payer_name"], "note": row["note"],
-        "received_at": row["received_at"].isoformat(), "status": row["status"],
+        "received_at": row["received_at"].astimezone(IST).isoformat(), "status": row["status"],
         "match_rule": row["match_rule"],
     }
 
@@ -111,7 +111,7 @@ def _apply_parts(conn, inst: int, credit_row: dict, parts) -> list[dict]:
         receipt = {
             "member_id": member_id, "ref_code": member["ref_code"], "member_name": member["name"],
             "phone": member["phone"], "utr": credit_row["utr"], "amount": to_rupees(amount),
-            "received_at": credit_row["received_at"].isoformat(), "covered": covered,
+            "received_at": credit_row["received_at"].astimezone(IST).isoformat(), "covered": covered,
             "credit_after": to_rupees(after["credit"]), "outstanding_after": to_rupees(after["outstanding"]),
         }
         outbox.enqueue(conn, inst, kind="payment_receipt", member_id=member_id, payload=receipt)
