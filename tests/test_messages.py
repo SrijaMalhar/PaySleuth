@@ -135,23 +135,35 @@ def test_a_slow_worker_cannot_overwrite_the_new_owners_state(conn, inst):
 
 
 def test_many_workers_deliver_every_message_exactly_once(pool, conn, inst):
-    members = [add_member(conn, inst, f"Child {i}") for i in range(30)]
+    """Twelve workers racing for the same rows, one row per claim.
+
+    batch=1 on purpose: every claim becomes its own contended statement, so the
+    window between selecting a row and marking it `sending` is sampled once per
+    message rather than once per batch. With a larger batch this passed on a
+    developer machine and let `FOR UPDATE SKIP LOCKED` be deleted on a smaller
+    CI runner without anything going red -- the mechanism was right and the
+    test was not sampling hard enough to say so.
+    """
+    members = [add_member(conn, inst, f"Child {i}") for i in range(60)]
     for i, member_id in enumerate(members):
-        _pay(conn, inst, member_id, f"6154123456{i:02d}")
+        _pay(conn, inst, member_id, f"6154123{i:05d}")
     gateway = Gateway()
+    start = threading.Barrier(12)
 
     def work():
+        start.wait()
         with pool.connection() as c:
-            while relay_once(c, inst, gateway, now=lambda: T0, batch=3)["claimed"]:
+            while relay_once(c, inst, gateway, now=lambda: T0, batch=1)["claimed"]:
                 pass
 
-    threads = [threading.Thread(target=work) for _ in range(6)]
+    threads = [threading.Thread(target=work) for _ in range(12)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     ids = [p["message_id"] for p in gateway.sent]
-    assert len(ids) == 30 and len(set(ids)) == 30
+    assert len(set(ids)) == 60, "a message was lost"
+    assert len(ids) == 60, f"{len(ids) - len(set(ids))} message(s) went out twice"
 
 
 # --- reminders -----------------------------------------------------------------------------
