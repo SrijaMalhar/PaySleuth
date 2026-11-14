@@ -259,6 +259,17 @@ id first, no wait cycle can form. The alternative, locking "from then to" when m
 moment one clerk moves money from Diya to Kabir while another moves different money the other way.
 `lock_members()` is the only place that takes a member lock, and it sorts. → **[docs/concurrency.md](docs/concurrency.md)**
 
+`decide()` is those five rules, in order, and they are a closed list rather than a plugin registry
+because they are what spends money without a human — they should be readable top to bottom on one screen
+and changed with intent, not discovered at import time:
+
+1. Exactly one reference code (`PS1004`) in the note → that member.
+2. Several codes, and the amount equals exactly what they owe together → split by what each owes.
+3. A UPI ID registered to exactly one member → that member.
+4. A UPI ID shared by siblings, and the amount equals their dues or fees together → split. Never a ₹0
+   share, so a sibling on a full scholarship goes to review instead.
+5. Anything else → the review queue, with ranked suggestions that are shown and never applied.
+
 ## Idempotency: seven keys for seven questions
 
 "Make it idempotent" is not one decision. Each repeated action has its own natural key, and choosing the
@@ -278,6 +289,17 @@ An eighth is the transport's rather than the domain's: a client may send `Idempo
 request and get the first reply back. It exists because `POST /members` has no natural identity — two
 students called Diya Sharma are two students — and a client that timed out cannot tell a lost request from
 a lost response.
+
+Outgoing messages are signed `X-PaySleuth-Signature: t=<unix>,v1=<hex HMAC-SHA256>` over
+`"<t>.<body bytes>"` — signing the timestamp *with* the body is what stops a captured message being
+replayed with a fresh `t`. Logs are one JSON object per line with phone numbers and UPI IDs masked in a
+filter on the handler, so a line added later anywhere is masked without the author remembering. Every
+caller gets a token bucket: 120 a minute, burst 30, refused with `429` and a `Retry-After` a client can
+trust.
+
+API keys are hashed with SHA-256 rather than a slow KDF, deliberately: a work factor defends secrets
+*people choose*, and a key here is 32 bytes of CSPRNG output. The argument rests on the entropy rather than
+the hash, so `tests/test_api_keys.py` asserts the entropy and a mutation that shortens a key turns it red.
 
 ## Module structure
 
@@ -386,61 +408,9 @@ the layer that caught it.
 
 ---
 
-## Running it
-
-```bash
-docker compose up -d db
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
-
-python -m tools.walkthrough        # the five beats in the GIF above
-python -m tools.seed_demo          # a centre mid-month, for clicking through /docs
-uvicorn paysleuth.main:app &       # API docs at http://localhost:8000/docs
-pytest -q                          # 447 tests
-python tools/mutation_check.py     # 32 safety mechanisms, each deleted and caught
-```
-
-The five automatic rules, in order. Only these decide without a human:
-
-1. Exactly one reference code (`PS1004`) in the note → that member.
-2. Several codes, and the amount equals exactly what they owe together → split by what each owes.
-3. A UPI ID registered to exactly one member → that member.
-4. A UPI ID shared by siblings, and the amount equals their dues or fees together → split. Never a ₹0
-   share, so a sibling on a full scholarship goes to review instead.
-5. Anything else → the review queue, with ranked suggestions that are shown and never applied.
-
-Outgoing messages are signed `X-PaySleuth-Signature: t=<unix>,v1=<hex HMAC-SHA256>` over
-`"<t>.<body bytes>"` — signing the timestamp *with* the body is what stops a captured message being
-replayed with a fresh `t`. Logs are one JSON object per line with phone numbers and UPI IDs masked in a
-filter on the handler, so a line added later anywhere is masked without the author remembering. Every
-caller gets a token bucket: 120 a minute, burst 30, refused with `429` and a `Retry-After` a client can
-trust.
-
-API keys are hashed with SHA-256 rather than a slow KDF, deliberately: a work factor defends secrets
-*people choose*, and a key here is 32 bytes of CSPRNG output. The argument rests on the entropy rather than
-the hash, so `tests/test_api_keys.py` asserts the entropy and a mutation that shortens a key turns it red.
-
-## Limits
-
-Stated plainly, because an unstated limit is a claim.
-
-- **The matching numbers are unmeasured.** `GET /reports/matching` computes the auto-match rate and
-  suggestion accuracy from an institution's own recorded decisions, and `tools/tune_weights.py` tunes the
-  weights against them with 5-fold cross-validation, refusing to propose anything from fewer than 50
-  decisions. No real institution has used this, so there is no real-world rate to quote and none is
-  invented here. The current weights are informed guesses; `tools/pilot.py` is the path to a measured one.
-- **The bank adapters are written against published export layouts**, and the golden statements in
-  `tests/golden/` are synthetic. Each should be re-checked against a real anonymised export before it is
-  trusted.
-- **SBI and Canara print UPI IDs truncated or masked, and Axis prints none**, so for those banks matching
-  relies on reference codes or review. A truncated ID is never stored as if it were the payer's.
-- **A change to a statement file's very first line** is visible only against the previous statement, not
-  within the file. There is a test that says so.
-- **A single upload must fit in memory** for the grouping pass (10 MB cap at the API).
-- **No web UI.** The API and `/docs` are the interface.
-
----
+**Running it:** [local setup](docs/running.md) · [deploying and running a pilot](docs/deploying.md) ·
+[what this does not do](docs/limits.md)
 
 **Deeper:** [concurrency](docs/concurrency.md) · [how correctness is established](docs/correctness.md) ·
 [design notes](docs/design-notes.md) · [performance](docs/performance.md) ·
-[parallel import equivalence](docs/parallel-import.md) · [running a pilot and deploying](docs/deploying.md)
+[parallel import equivalence](docs/parallel-import.md)
