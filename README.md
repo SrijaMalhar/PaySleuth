@@ -40,8 +40,8 @@ the arithmetic. Catching it needs a third question, asked of the database rather
 
 | | |
 |---|---|
-| **447 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
-| **32/32 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
+| **450 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **33/33 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
 | **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
 | **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence tested at 1, 4, 8 and 16 workers |
 | **12 bugs, listed by name** | including the one where a feature's headline claim in this README was false |
@@ -281,7 +281,8 @@ a lost response.
 Outgoing messages are signed `X-PaySleuth-Signature: t=<unix>,v1=<hex HMAC-SHA256>` over
 `"<t>.<body bytes>"` — signing the timestamp *with* the body is what stops a captured message being
 replayed with a fresh `t`. Logs are one JSON object per line with phone numbers and UPI IDs masked in a
-filter on the handler, so a line added later anywhere is masked without the author remembering. Every
+filter on the handler, so a line added later anywhere is masked without the author remembering — uvicorn's
+own startup and access lines included, which install their own handlers and would otherwise bypass both. Every
 caller gets a token bucket: 120 a minute, burst 30, refused with `429` and a `Retry-After` a client can
 trust.
 
@@ -379,7 +380,7 @@ Six layers, each catching what the one above cannot:
 3. **Concurrency tests** — real threads on a barrier, with the bad interleaving *forced*.
 4. **Equivalence testing** — parallel import against a serial baseline at four worker counts, the whole
    set of books hashed to one fingerprint.
-5. **Mutation testing** — one safety mechanism deleted at a time, 32/32 caught. This is the layer that
+5. **Mutation testing** — one safety mechanism deleted at a time, 33/33 caught. This is the layer that
    answers "do your tests actually test that?" It has twice failed a mechanism that was correct and a test
    that was not — the rate limiter's lock survived deletion because the test passed about one run in three
    without it, and a test that flaky is worse than none.

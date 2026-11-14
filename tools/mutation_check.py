@@ -27,6 +27,9 @@ class Mutation:
 
 
 MUTATIONS = [
+    Mutation("the server's own loggers keep their handlers", "paysleuth/logging_setup.py",
+             (("    take_over(SERVER_LOGGERS)", "    pass"),),
+             "tests/test_monitoring.py::test_the_server_writes_json_too_not_just_the_application"),
     Mutation("api keys shortened to something guessable", "paysleuth/institutions.py",
              (("KEY_BYTES = 32", "KEY_BYTES = 4"),),
              "tests/test_api_keys.py::test_a_key_carries_enough_entropy_that_a_fast_hash_is_the_right_one"),

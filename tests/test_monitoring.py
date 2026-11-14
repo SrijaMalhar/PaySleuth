@@ -204,6 +204,51 @@ def test_the_text_format_is_still_available_for_a_terminal():
     assert not line.startswith("{")
 
 
+def test_the_server_writes_json_too_not_just_the_application():
+    """uvicorn installs its own handlers and sets propagate=False.
+
+    Its startup and access lines would otherwise bypass both the formatter and
+    the mask -- and the access log is the highest-volume thing it writes. CI
+    caught this by checking the container's output parsed; the test is so that
+    it is caught here instead.
+    """
+    stream = io.StringIO()
+    for name in ("uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        logger.handlers = [logging.StreamHandler(io.StringIO())]      # as uvicorn leaves it
+        logger.propagate = False
+
+    configure(logging.INFO, stream)
+
+    logging.getLogger("uvicorn.error").info("Application startup complete.")
+    logging.getLogger("uvicorn.access").info('%s - "%s" %d', "127.0.0.1:1", "GET /health", 200)
+
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [entry["logger"] for entry in lines] == ["uvicorn.error", "uvicorn.access"]
+    assert lines[1]["message"] == '127.0.0.1:1 - "GET /health" 200'
+
+
+def test_the_access_log_is_masked_like_everything_else():
+    """A path can carry an identifier, and the access log is where paths live."""
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s" %d', "10.0.0.1:1", "GET /members/by-phone/9876543210", 200)
+    assert "9876543210" not in stream.getvalue()
+    assert "98****3210" in json.loads(stream.getvalue())["message"]
+
+
+def test_the_log_checker_finds_a_line_that_is_not_an_entry():
+    """What CI runs against the container's output."""
+    from tools.check_json_logs import offenders
+
+    good = '{"at": "now", "level": "INFO", "logger": "x", "message": "up"}'
+    assert offenders(good + "\n\n" + good) == []
+    assert offenders("INFO:     Started server process [1]")
+    assert offenders('"a bare string"'), "parsed as JSON, but is not a log entry"
+    assert offenders(good + "\nINFO:     Application startup complete.")[0].startswith("2:")
+
+
 def test_a_broken_format_string_does_not_lose_the_record():
     record = logging.LogRecord("x", logging.INFO, __file__, 1, "%s %s", ("only one",), None)
     assert MaskPersonalData().filter(record) is True

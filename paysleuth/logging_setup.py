@@ -149,3 +149,21 @@ def configure(level: str | int = logging.INFO, stream=None, fmt: str = "json") -
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+    take_over(SERVER_LOGGERS)
+
+
+# uvicorn and gunicorn install their own handlers and set propagate=False, so
+# their lines never reach the root handler: not formatted as JSON, and -- the
+# part that matters -- never passed through the mask. The access log is the
+# highest-volume thing either of them writes and the most likely to carry a
+# path with somebody's identifier in it.
+SERVER_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "gunicorn", "gunicorn.error",
+                  "gunicorn.access")
+
+
+def take_over(names) -> None:
+    """Make these loggers propagate to the root handler instead of their own."""
+    for name in names:
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.propagate = True
