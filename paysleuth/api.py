@@ -11,6 +11,7 @@ JSON number, because many clients parse JSON numbers as floats.
 
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 
@@ -36,7 +37,9 @@ from .metrics import collect, render
 from .money import to_paise
 from .outbox import dead_messages, relay_once
 from .payments import assign_credit, get_credit, record_credit, reverse_credit, review_queue, split_credit
+from .paging import DEFAULT as PAGE_DEFAULT, MAX as PAGE_MAX
 from .periods import IST, period_of, today_ist, utc_now
+from .ratelimit import DEFAULT_BURST, DEFAULT_RATE, RateLimiter
 from .reminders import queue_reminders
 from .reports import ageing, collection_report, defaulters, statement
 from .banks.common import full_upi_id
@@ -146,7 +149,8 @@ def _with_etag(view: dict, response: Response) -> dict:
 # --- the app ---------------------------------------------------------------------------
 
 def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: str | None = None,
-               pool_size: int = 20, metrics_token: str | None = None) -> FastAPI:
+               pool_size: int = 20, metrics_token: str | None = None,
+               rate: int = DEFAULT_RATE, burst: int = DEFAULT_BURST, clock=time.monotonic) -> FastAPI:
     """Build the app in a function, so tests can pass a fake sender, a fixed date and a test schema."""
     pool = make_pool(dsn, max_size=pool_size, options=pool_options)
     migrate(pool)
@@ -160,6 +164,9 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
                   description="Matches UPI bank-statement credits to the members they pay for.",
                   lifespan=lifespan)
     app.state.pool = pool
+    # One bucket per caller. The clock is injected so the tests can run a minute
+    # of traffic without waiting a minute.
+    app.state.limiter = RateLimiter(rate=rate, burst=burst, clock=clock)
 
     def _error(status: int):
         def handler(request: Request, exc: Exception):
@@ -190,6 +197,18 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         key = request.headers.get("x-api-key")
         who = await run_in_threadpool(_identify, key) if key else None
         request.state.actor = who
+
+        # Limit after identifying, so the bucket belongs to the caller rather than
+        # to whichever address they happen to be behind. /health is exempt: it is
+        # what an uptime check and the scheduled jobs poll, and refusing it would
+        # make a busy institution look down.
+        if request.url.path != "/health":
+            caller = f"staff:{who.staff_id}" if who else f"ip:{request.client.host if request.client else 'unknown'}"
+            retry_after = app.state.limiter.take(caller)
+            if retry_after is not None:
+                return JSONResponse(
+                    status_code=429, headers={"Retry-After": str(retry_after)},
+                    content={"detail": f"too many requests; retry in {retry_after}s"})
         token = current_actor.set(who.staff_id if who else None)
         try:
             return await call_next(request)
@@ -245,8 +264,9 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return _with_etag(view, response)
 
     @app.get("/members")
-    def members(active_only: bool = False, inst=Depends(institution), c=Depends(conn)):
-        return list_members(c, inst, active_only=active_only)
+    def members(active_only: bool = False, limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0),
+                inst=Depends(institution), c=Depends(conn)):
+        return list_members(c, inst, active_only=active_only, limit=limit, offset=offset)
 
     @app.get("/members/{member_id}")
     def member(member_id: int, response: Response, inst=Depends(institution), c=Depends(conn)):
@@ -368,8 +388,8 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return relay_once(c, inst, send, now=now)
 
     @app.get("/outbox/dead")
-    def dead(inst=Depends(institution), c=Depends(conn)):
-        return dead_messages(c, inst)
+    def dead(limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0), inst=Depends(institution), c=Depends(conn)):
+        return dead_messages(c, inst, limit=limit, offset=offset)
 
     # staff and approvals
 
@@ -383,16 +403,18 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return add_staff(c, who.institution_id, body.name, body.role)
 
     @app.get("/staff")
-    def staff(who: Actor = Depends(owner), c=Depends(conn)):
-        return list_staff(c, who.institution_id)
+    def staff(limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0), who: Actor = Depends(owner), c=Depends(conn)):
+        return list_staff(c, who.institution_id, limit=limit, offset=offset)
 
     @app.post("/staff/{staff_id}/deactivate")
     def remove_staff(staff_id: int, who: Actor = Depends(owner), c=Depends(conn)):
         return deactivate_staff(c, who.institution_id, staff_id)
 
     @app.get("/approvals")
-    def approvals(status: str | None = "pending", inst=Depends(institution), c=Depends(conn)):
-        return list_approvals(c, inst, None if status == "all" else status)
+    def approvals(status: str | None = "pending", limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0),
+                  inst=Depends(institution), c=Depends(conn)):
+        return list_approvals(c, inst, None if status == "all" else status,
+                              limit=limit, offset=offset)
 
     @app.post("/approvals/{approval_id}/approve")
     def approve(approval_id: int, body: DecisionIn | None = None, who: Actor = Depends(actor),
@@ -411,16 +433,18 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
         return run_close(c, inst, day or today())
 
     @app.get("/close")
-    def closes(inst=Depends(institution), c=Depends(conn)):
-        return recent_closes(c, inst)
+    def closes(limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0), inst=Depends(institution), c=Depends(conn)):
+        return recent_closes(c, inst, limit=limit, offset=offset)
 
     @app.get("/statements")
-    def statements(inst=Depends(institution), c=Depends(conn)):
-        return list_statements(c, inst)
+    def statements(limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0), inst=Depends(institution), c=Depends(conn)):
+        return list_statements(c, inst, limit=limit, offset=offset)
 
     @app.get("/alerts")
-    def alerts(status: str | None = "open", inst=Depends(institution), c=Depends(conn)):
-        return list_alerts(c, inst, status=None if status == "all" else status)
+    def alerts(status: str | None = "open", limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0),
+               inst=Depends(institution), c=Depends(conn)):
+        return list_alerts(c, inst, status=None if status == "all" else status,
+                           limit=limit, offset=offset)
 
     @app.post("/alerts/{alert_id}/resolve")
     def resolve(alert_id: int, inst=Depends(institution), c=Depends(conn)):
@@ -438,15 +462,16 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
 
     @app.get("/reports/defaulters")
     def defaulters_report(min_days: int = Query(30, ge=0), as_of: date | None = None,
+                          limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0),
                           inst=Depends(institution), c=Depends(conn)):
-        return defaulters(c, inst, as_of or today(), min_days)
+        return defaulters(c, inst, as_of or today(), min_days, limit=limit, offset=offset)
 
     @app.get("/reports/matching")
     def matching(inst=Depends(institution), c=Depends(conn)):
         return matching_report(c, inst, now())
 
     @app.get("/audit")
-    def audit_log(limit: int = Query(100, ge=1, le=1000), inst=Depends(institution), c=Depends(conn)):
-        return audit.recent(c, inst, limit)
+    def audit_log(limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX), offset: int = Query(0, ge=0), inst=Depends(institution), c=Depends(conn)):
+        return audit.recent(c, inst, limit=limit, offset=offset)
 
     return app

@@ -21,6 +21,7 @@ from .db import tenant_tx
 from .errors import NotFound
 from .money import to_rupees
 from .statements import normalise_utr
+from .paging import limits
 
 
 def record_statement(conn, inst: int, text: str, check: Continuity, line_count: int,
@@ -164,9 +165,12 @@ def _statement_view(row: dict, *, already_imported: bool, gap: dict | None = Non
             "breaks": row["breaks"], "gap": gap}
 
 
-def list_statements(conn, inst: int) -> list[dict]:
+def list_statements(conn, inst: int, limit: int | None = None,
+                    offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
-        rows = conn.execute("SELECT * FROM statement_imports ORDER BY id").fetchall()
+        rows = conn.execute("SELECT * FROM statement_imports ORDER BY id LIMIT %s OFFSET %s",
+                            (size, start)).fetchall()
     return [_statement_view(r, already_imported=True) for r in rows]
 
 
@@ -244,8 +248,10 @@ def run_close(conn, inst: int, day: date) -> dict:
         return {"day": day.isoformat(), "status": status, **figures}
 
 
-def recent_closes(conn, inst: int, limit: int = 30) -> list[dict]:
+def recent_closes(conn, inst: int, limit: int | None = None,
+                  offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
-        rows = conn.execute("SELECT day, status, figures FROM daily_closes ORDER BY day DESC LIMIT %s",
-                            (limit,)).fetchall()
+        rows = conn.execute("SELECT day, status, figures FROM daily_closes "
+                            "ORDER BY day DESC LIMIT %s OFFSET %s", (size, start)).fetchall()
     return [{"day": r["day"].isoformat(), "status": r["status"], **r["figures"]} for r in rows]

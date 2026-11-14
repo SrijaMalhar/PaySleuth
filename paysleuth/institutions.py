@@ -7,6 +7,7 @@ from . import audit
 from .actors import Actor
 from .db import tenant_tx
 from .errors import Conflict, NotFound
+from .paging import limits
 
 ROLES = ("owner", "clerk")
 
@@ -76,9 +77,11 @@ def add_staff(conn, institution_id: int, name: str, role: str) -> dict:
     return {"id": staff_id, "name": name, "role": role, "active": True, "api_key": key}
 
 
-def list_staff(conn, institution_id: int) -> list[dict]:
-    return conn.execute("SELECT id, name, role, active FROM staff WHERE institution_id = %s ORDER BY id",
-                        (institution_id,)).fetchall()
+def list_staff(conn, institution_id: int, limit: int | None = None,
+               offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
+    return conn.execute("SELECT id, name, role, active FROM staff WHERE institution_id = %s "
+                        "ORDER BY id LIMIT %s OFFSET %s", (institution_id, size, start)).fetchall()
 
 
 def deactivate_staff(conn, institution_id: int, staff_id: int) -> dict:

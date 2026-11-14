@@ -4,6 +4,7 @@ from psycopg.types.json import Jsonb
 
 from .db import tenant_tx
 from .errors import NotFound
+from .paging import limits
 
 
 def raise_alert(conn, inst: int, kind: str, message: str, dedupe_key: str, **details) -> int | None:
@@ -21,11 +22,14 @@ def _view(row: dict) -> dict:
             "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None}
 
 
-def list_alerts(conn, inst: int, *, status: str | None = "open") -> list[dict]:
+def list_alerts(conn, inst: int, *, status: str | None = "open",
+                limit: int | None = None, offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
         rows = conn.execute(
             "SELECT id, kind, message, details, status, created_at, resolved_at FROM alerts "
-            "WHERE (%s::text IS NULL OR status = %s) ORDER BY id", (status, status)).fetchall()
+            "WHERE (%s::text IS NULL OR status = %s) ORDER BY id LIMIT %s OFFSET %s",
+            (status, status, size, start)).fetchall()
     return [_view(r) for r in rows]
 
 

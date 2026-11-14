@@ -9,6 +9,7 @@ from .db import lock_members, tenant_tx
 from .errors import Conflict, NotFound, PreconditionFailed
 from .money import check_text, to_rupees
 from .periods import check_period
+from .paging import limits
 
 EDITABLE = {"name", "guardian_name", "phone", "billing_day", "concession_pct"}
 
@@ -238,11 +239,13 @@ def deactivate_member(conn, inst: int, member_id: int, expected_version: int) ->
         return _view(conn, _row(conn, member_id))
 
 
-def list_members(conn, inst: int, *, active_only: bool = False) -> list[dict]:
+def list_members(conn, inst: int, *, active_only: bool = False,
+                 limit: int | None = None, offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
         rows = conn.execute("SELECT id, ref_code, name, guardian_name, active FROM members "
-                            "WHERE institution_id = %s AND (active OR NOT %s) ORDER BY id",
-                            (inst, active_only)).fetchall()
+                            "WHERE institution_id = %s AND (active OR NOT %s) ORDER BY id "
+                            "LIMIT %s OFFSET %s", (inst, active_only, size, start)).fetchall()
         money = balances(conn, [r["id"] for r in rows])
         return [{**r, "outstanding": to_rupees(money[r["id"]]["outstanding"]),
                  "credit": to_rupees(money[r["id"]]["credit"])} for r in rows]

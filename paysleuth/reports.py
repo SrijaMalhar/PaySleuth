@@ -11,6 +11,7 @@ from .db import tenant_tx
 from .errors import NotFound
 from .money import to_rupees
 from .periods import IST, check_period
+from .paging import limits
 
 
 def _percent(part: int, whole: int) -> str:
@@ -114,8 +115,14 @@ def ageing(conn, inst: int, as_of: date) -> dict:
     }
 
 
-def defaulters(conn, inst: int, as_of: date, min_days: int = 30) -> list[dict]:
-    """Members with money overdue at least min_days, largest first."""
+def defaulters(conn, inst: int, as_of: date, min_days: int = 30,
+               limit: int | None = None, offset: int | None = None) -> list[dict]:
+    """Members with money overdue at least min_days, largest first.
+
+    Ordered before it is cut, so a page is the worst N rather than an arbitrary
+    N -- which is the only cut that means anything for this report.
+    """
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
         rows = conn.execute(
             """WITH unpaid AS (
@@ -126,6 +133,8 @@ def defaulters(conn, inst: int, as_of: date, min_days: int = 30) -> list[dict]:
                       MAX(%(d)s - u.due_date) AS oldest_days
                  FROM unpaid u JOIN members m ON m.id = u.member_id
                 WHERE %(d)s - u.due_date >= %(min)s
-                GROUP BY m.id ORDER BY overdue DESC, m.id""", {"d": as_of, "min": min_days}).fetchall()
+                GROUP BY m.id ORDER BY overdue DESC, m.id
+                LIMIT %(limit)s OFFSET %(offset)s""",
+            {"d": as_of, "min": min_days, "limit": size, "offset": start}).fetchall()
     return [{"member_id": r["id"], "ref_code": r["ref_code"], "name": r["name"], "phone": r["phone"],
              "overdue": to_rupees(r["overdue"]), "oldest_days_overdue": r["oldest_days"]} for r in rows]

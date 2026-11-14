@@ -17,6 +17,7 @@ from .errors import Conflict, Forbidden, NotFound
 from .institutions import settings
 from .money import to_rupees
 from .payments import _check_parts, _current_parts, _lock_credit, _normalise_parts, reassign_credit
+from .paging import limits
 
 
 def request_reassign(conn, inst: int, actor: Actor, credit_id: int, parts) -> dict:
@@ -82,7 +83,9 @@ def decide(conn, inst: int, actor: Actor, approval_id: int, *, approve: bool, no
         return {"approval_id": approval_id, "status": status, "result": result}
 
 
-def list_approvals(conn, inst: int, status: str | None = "pending") -> list[dict]:
+def list_approvals(conn, inst: int, status: str | None = "pending",
+                   limit: int | None = None, offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
         rows = conn.execute(
             """SELECT r.id, r.action, r.bank_credit_id, b.utr, r.amount, r.payload, r.status, r.note,
@@ -90,6 +93,7 @@ def list_approvals(conn, inst: int, status: str | None = "pending") -> list[dict
                       r.created_at, r.decided_at
                  FROM approval_requests r JOIN bank_credits b ON b.id = r.bank_credit_id
                  JOIN staff q ON q.id = r.requested_by LEFT JOIN staff d ON d.id = r.decided_by
-                WHERE %s::text IS NULL OR r.status = %s ORDER BY r.id""", (status, status)).fetchall()
+                WHERE %s::text IS NULL OR r.status = %s ORDER BY r.id
+                LIMIT %s OFFSET %s""", (status, status, size, start)).fetchall()
     return [{**r, "amount": to_rupees(r["amount"]), "created_at": r["created_at"].isoformat(),
              "decided_at": r["decided_at"].isoformat() if r["decided_at"] else None} for r in rows]

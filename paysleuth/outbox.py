@@ -19,6 +19,7 @@ from .db import tenant_tx
 from .institutions import settings
 from .money import to_rupees
 from .periods import IST, utc_now
+from .paging import limits
 
 # 12 attempts over about two and a half hours: long enough to ride out a gateway
 # outage, short enough that a genuinely undeliverable message is parked the same
@@ -178,9 +179,12 @@ def relay_once(conn, inst: int, send, *, now=utc_now, batch: int = 50) -> dict:
     return summary
 
 
-def dead_messages(conn, inst: int) -> list[dict]:
+def dead_messages(conn, inst: int, limit: int | None = None,
+                  offset: int | None = None) -> list[dict]:
+    size, start = limits(limit, offset)
     with tenant_tx(conn, inst):
         rows = conn.execute("SELECT id, message_id, kind, member_id, attempts, last_error, created_at "
-                            "FROM outbox WHERE status = 'dead' ORDER BY id").fetchall()
+                            "FROM outbox WHERE status = 'dead' ORDER BY id LIMIT %s OFFSET %s",
+                            (size, start)).fetchall()
     return [{**r, "message_id": str(r["message_id"]), "created_at": r["created_at"].isoformat()}
             for r in rows]
