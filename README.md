@@ -93,29 +93,26 @@ no float ever touches money, because `int(0.29 * 100)` is 28. Billing months are
 
 ## The object model
 
-The pure layer — everything testable with no database — is six frozen dataclasses.
+The pure layer — everything testable with no database — is frozen dataclasses. These four are the
+matching path, from what the bank said to what gets written; `StatementRow` and `Continuity` carry the
+parsing side and are covered in [docs/concurrency.md](docs/concurrency.md).
+
+An empty `Decision.parts` is the review queue: refusing is a value, not an exception.
 
 ```mermaid
 classDiagram
+    direction LR
     class Credit {
         <<frozen>>
         +str utr
         +int amount "paise, never float"
-        +datetime received_at
         +str|None payer_upi_id
         +str|None payer_name
         +str|None note
-        +int line
-    }
-    class Decision {
-        <<frozen>>
-        +tuple parts "member_id and paise pairs"
-        +str|None rule "empty parts == needs_review"
     }
     class Facts {
         <<frozen>>
         +dict member
-        +dict credit
         +int owed
         +about(member, credit, context)$ Facts
     }
@@ -125,26 +122,17 @@ classDiagram
         +int weight
         +Callable~Facts,bool~ fires
         +Callable~Facts,str~ reason
-        +str|None group "mutually exclusive"
+        +str|None group
     }
-    class StatementRow {
+    class Decision {
         <<frozen>>
-        +int line
-        +int debit
-        +int credit
-        +int|None balance
-    }
-    class Continuity {
-        <<frozen>>
-        +str status
-        +int|None opening
-        +int|None closing
+        +tuple parts
+        +str|None rule
     }
 
-    Signal ..> Facts : reads
-    Facts ..> Credit : wraps
-    Decision <.. Signal : "ranks, never decides"
-    Continuity <.. StatementRow : "checks the running balance"
+    Credit <.. Facts : wraps
+    Facts <.. Signal : reads
+    Signal ..> Decision : "ranks, never decides"
 ```
 
 `Signal` is the one to look at. A reason to believe a credit belongs to a member is **one value** carrying
@@ -306,7 +294,7 @@ the hash, so `tests/test_api_keys.py` asserts the entropy and a mutation that sh
 Ten layers, acyclic, dependencies pointing one way.
 
 ```mermaid
-graph TD
+graph LR
     subgraph L10[" "]
         main["main · ASGI entry"]
     end
@@ -361,6 +349,7 @@ graph TD
     end
 
     main --> api --> L8 --> L7 --> L6 --> L5 --> L4 --> L3 --> L2 --> L1
+    %% left to right, so the arrow reads the way the dependency points
 
     style L1 fill:#0d1117,stroke:#2ea043,color:#c9d1d9
 ```
