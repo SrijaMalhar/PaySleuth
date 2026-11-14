@@ -7,11 +7,12 @@ from fastapi.responses import PlainTextResponse
 
 from ..metrics import collect, render
 from .deps import conn, now
+from .schemas import HealthOut
 
 router = APIRouter(tags=["system"])
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthOut)
 def health(c=Depends(conn)):
     """Touches the database, so a pass means the connection is alive too."""
     c.execute("SELECT 1")

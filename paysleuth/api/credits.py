@@ -16,14 +16,15 @@ from ..payments import (assign_credit, get_credit, record_credit, reverse_credit
 from ..periods import IST
 from ..statements import Credit, parse_narration
 from .deps import actor, conn, institution, page, today
-from .schemas import AssignIn, CreditIn, ReassignIn, ReverseIn, SplitIn, parts_to_paise
+from .schemas import (AssignIn, CreditDetail, CreditIn, ReassignIn, RecordCreditOut,
+                      ReverseIn, ReviewItem, SplitIn, parts_to_paise)
 
 MAX_UPLOAD = 10 * 1024 * 1024
 
 router = APIRouter(tags=["bank credits"])
 
 
-@router.post("/bank-credits", status_code=201)
+@router.post("/bank-credits", status_code=201, response_model=RecordCreditOut)
 def add_credit(body: CreditIn, response: Response, inst=Depends(institution), c=Depends(conn)):
     # A UPI ID that is cut short or masked is dropped rather than refused: the
     # credit is real money and must be recorded, while the ID is only a hint
@@ -74,7 +75,7 @@ def import_csv(request: Request, file: UploadFile = File(...),
                             account=account)
 
 
-@router.get("/bank-credits/{credit_id}")
+@router.get("/bank-credits/{credit_id}", response_model=CreditDetail)
 def bank_credit(credit_id: int, inst=Depends(institution), c=Depends(conn)):
     return get_credit(c, inst, credit_id)
 
@@ -93,17 +94,17 @@ def reverse(credit_id: int, body: ReverseIn, inst=Depends(institution), c=Depend
     return reverse_credit(c, inst, credit_id, reason=body.reason, reference=body.reference)
 
 
-@router.get("/review")
+@router.get("/review", response_model=list[ReviewItem])
 def review(paging=Depends(page), inst=Depends(institution), c=Depends(conn), day=Depends(today)):
     limit, _ = paging
     return review_queue(c, inst, day, limit)
 
 
-@router.post("/review/{credit_id}/assign")
+@router.post("/review/{credit_id}/assign", response_model=RecordCreditOut)
 def assign(credit_id: int, body: AssignIn, inst=Depends(institution), c=Depends(conn)):
     return assign_credit(c, inst, credit_id, body.member_id, body.remember_upi_id)
 
 
-@router.post("/review/{credit_id}/split")
+@router.post("/review/{credit_id}/split", response_model=RecordCreditOut)
 def split(credit_id: int, body: SplitIn, inst=Depends(institution), c=Depends(conn)):
     return split_credit(c, inst, credit_id, parts_to_paise(body.parts), body.remember_upi_id)

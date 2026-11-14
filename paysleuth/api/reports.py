@@ -13,6 +13,7 @@ from ..evaluation import matching_report
 from ..periods import period_of
 from ..reports import ageing, collection_report, defaulters
 from .deps import conn, institution, now, page, today
+from .schemas import AuditOut, DefaulterOut
 
 router = APIRouter(tags=["reports"])
 
@@ -29,7 +30,7 @@ def ageing_report(as_of: date | None = None, inst=Depends(institution), c=Depend
     return ageing(c, inst, as_of or day)
 
 
-@router.get("/reports/defaulters")
+@router.get("/reports/defaulters", response_model=list[DefaulterOut])
 def defaulters_report(min_days: int = Query(30, ge=0), as_of: date | None = None,
                       paging=Depends(page), inst=Depends(institution), c=Depends(conn),
                       day=Depends(today)):
@@ -42,7 +43,7 @@ def matching(inst=Depends(institution), c=Depends(conn), at=Depends(now)):
     return matching_report(c, inst, at)
 
 
-@router.get("/audit")
+@router.get("/audit", response_model=list[AuditOut])
 def audit_log(paging=Depends(page), inst=Depends(institution), c=Depends(conn)):
     limit, offset = paging
     return audit.recent(c, inst, limit=limit, offset=offset)

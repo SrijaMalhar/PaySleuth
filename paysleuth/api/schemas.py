@@ -111,3 +111,193 @@ def version_from(if_match: str | None) -> int:
 def with_etag(view: dict, response: Response) -> dict:
     response.headers["ETag"] = etag(view["version"])
     return view
+
+
+# --- response bodies -------------------------------------------------------------------
+#
+# These are what /docs shows a client it will get back, and FastAPI filters the
+# response through them -- so a field missing here disappears from the API.
+# Each one was written against a real response rather than from reading the
+# function, and the shapes are asserted in tests/test_schemas.py.
+#
+# Not every endpoint has one. The daily close and the statement list carry a
+# jsonb `figures` whose keys are the close's own vocabulary, and the matching
+# report's `signals` block is keyed by signal name, so both are open by design;
+# typing them would mean freezing a shape that is meant to grow. Those stay
+# dict-typed, which is a statement about the data rather than an omission.
+
+class MemberSummary(BaseModel):
+    """One row of GET /members. The money is a string, like everywhere else."""
+    id: int
+    ref_code: str
+    name: str
+    guardian_name: str | None
+    active: bool
+    outstanding: str = Field(examples=["2100.00"])
+    credit: str = Field(examples=["0.00"])
+
+
+class FeeAt(BaseModel):
+    effective_period: str = Field(examples=["2026-06"])
+    monthly_fee: str
+
+
+class UpiIdOut(BaseModel):
+    upi_id: str
+    source: str = Field(description="registered by hand, or learned from a resolved credit")
+
+
+class MemberOut(MemberSummary):
+    """GET /members/{id}, and what every member write returns.
+
+    Carries `version`, which is the ETag: an edit must send it back as
+    If-Match or get a 428, and a stale one gets a 412.
+    """
+    phone: str | None
+    billing_day: int
+    start_period: str
+    billed_through: str | None
+    concession_pct: int
+    version: int
+    monthly_fee: str
+    fee_history: list[FeeAt]
+    upi_ids: list[UpiIdOut]
+
+
+class CreditOut(BaseModel):
+    id: int
+    utr: str
+    channel: str
+    amount: str
+    payer_upi_id: str | None
+    payer_name: str | None
+    note: str | None
+    received_at: str
+    status: str = Field(examples=["matched"], description="matched | needs_review | reversed")
+    match_rule: str | None = Field(description="which of the five rules decided, if any")
+
+
+class AppliedPart(BaseModel):
+    member_id: int
+    amount: str
+
+
+class RecordCreditOut(BaseModel):
+    credit: CreditOut
+    duplicate: bool = Field(description="true when this UTR was already recorded")
+    applied: list[AppliedPart]
+
+
+class Suggestion(BaseModel):
+    """A ranked guess, shown to a person and never applied on its own."""
+    member_id: int
+    ref_code: str
+    name: str
+    score: int
+    signals: list[str]
+    reasons: list[str] = Field(description="one sentence per signal, for the owner to read")
+
+
+class ReviewItem(CreditOut):
+    suggestions: list[Suggestion]
+
+
+class CreditPart(BaseModel):
+    member_id: int
+    ref_code: str
+    amount: str
+
+
+class PaymentRow(CreditPart):
+    payment_id: int
+    corrects_payment_id: int | None
+    recorded_at: str
+
+
+class CreditDetail(CreditOut):
+    """GET /bank-credits/{id}: where the money is now, and every row ever written.
+
+    `parts` is what stands; `history` is the append-only trail including the
+    corrections, which is the thing to show a parent who says they paid in May.
+    """
+    parts: list[CreditPart]
+    history: list[PaymentRow]
+
+
+class StaffOut(BaseModel):
+    id: int
+    name: str
+    role: str
+    active: bool
+
+
+class NewStaffOut(StaffOut):
+    api_key: str = Field(description="shown once; only its hash is stored")
+
+
+class MeOut(BaseModel):
+    staff_id: int
+    name: str
+    role: str
+    institution_id: int
+
+
+class HealthOut(BaseModel):
+    status: str
+
+
+class AlertOut(BaseModel):
+    id: int
+    kind: str
+    message: str
+    details: dict
+    status: str
+    created_at: str
+    resolved_at: str | None
+
+
+class ApprovalOut(BaseModel):
+    id: int
+    action: str
+    bank_credit_id: int
+    utr: str
+    amount: str
+    payload: dict
+    status: str
+    note: str | None
+    requested_by: int
+    requested_by_name: str
+    decided_by: int | None
+    decided_by_name: str | None
+    created_at: str
+    decided_at: str | None
+
+
+class DefaulterOut(BaseModel):
+    member_id: int
+    ref_code: str
+    name: str
+    phone: str | None
+    overdue: str
+    oldest_days_overdue: int
+
+
+class DeadMessageOut(BaseModel):
+    id: int
+    message_id: str
+    kind: str
+    member_id: int | None
+    attempts: int
+    last_error: str | None
+    created_at: str
+
+
+class AuditOut(BaseModel):
+    id: int
+    action: str
+    entity: str
+    entity_id: int | None
+    details: dict
+    created_at: str
+    actor_id: int | None
+    actor: str

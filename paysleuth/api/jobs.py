@@ -14,6 +14,7 @@ from ..close import list_statements, recent_closes, run_close
 from ..outbox import dead_messages, relay_once
 from ..reminders import queue_reminders
 from .deps import conn, institution, page, today
+from .schemas import AlertOut, DeadMessageOut
 
 router = APIRouter(tags=["jobs"])
 
@@ -37,7 +38,7 @@ def relay(request: Request, inst=Depends(institution), c=Depends(conn)):
     return relay_once(c, inst, request.app.state.send, now=request.app.state.now)
 
 
-@router.get("/outbox/dead")
+@router.get("/outbox/dead", response_model=list[DeadMessageOut])
 def dead(paging=Depends(page), inst=Depends(institution), c=Depends(conn)):
     limit, offset = paging
     return dead_messages(c, inst, limit=limit, offset=offset)
@@ -61,7 +62,7 @@ def statements(paging=Depends(page), inst=Depends(institution), c=Depends(conn))
     return list_statements(c, inst, limit=limit, offset=offset)
 
 
-@router.get("/alerts")
+@router.get("/alerts", response_model=list[AlertOut])
 def alerts(status: str | None = "open", paging=Depends(page),
            inst=Depends(institution), c=Depends(conn)):
     limit, offset = paging
@@ -69,6 +70,6 @@ def alerts(status: str | None = "open", paging=Depends(page),
                        limit=limit, offset=offset)
 
 
-@router.post("/alerts/{alert_id}/resolve")
+@router.post("/alerts/{alert_id}/resolve", response_model=AlertOut)
 def resolve(alert_id: int, inst=Depends(institution), c=Depends(conn)):
     return resolve_alert(c, inst, alert_id)
