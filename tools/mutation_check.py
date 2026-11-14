@@ -27,6 +27,16 @@ class Mutation:
 
 
 MUTATIONS = [
+    Mutation("idempotency key reusable with a different request", "paysleuth/idempotency.py",
+             (('if existing["fingerprint"] != mine:', 'if False:'),),
+             "tests/test_idempotency.py::test_the_same_key_with_a_different_body_is_refused"),
+    Mutation("a failed request keeps its idempotency key", "paysleuth/idempotency.py",
+             (("conn.execute(\"DELETE FROM idempotency_keys WHERE key = %s AND finished_at IS NULL\", (key,))",
+               "pass"),),
+             "tests/test_idempotency.py::test_a_failed_request_may_be_retried_under_the_same_key"),
+    Mutation("an unfinished reservation is never taken over", "paysleuth/idempotency.py",
+             (("AND idempotency_keys.reserved_at < now() - %s", "AND false"),),
+             "tests/test_idempotency.py::test_a_reservation_nobody_finished_is_taken_over"),
     Mutation("rate limiter hands out a token it does not have", "paysleuth/ratelimit.py",
              (("if bucket.tokens >= 1.0:", "if bucket.tokens >= 0.0:"),),
              "tests/test_ratelimit.py::test_a_caller_may_burst_then_is_refused"),

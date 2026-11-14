@@ -9,6 +9,7 @@ Money in and out of the API is always a string such as "2000.50", never a
 JSON number, because many clients parse JSON numbers as floats.
 """
 
+import json
 import re
 import secrets
 import time
@@ -21,7 +22,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from psycopg.errors import DataError
 from pydantic import BaseModel, Field
 
-from . import audit
+from . import audit, idempotency
 from .actors import Actor, current_actor
 from .alerts import list_alerts, resolve_alert
 from .approvals import decide, list_approvals, request_reassign
@@ -188,6 +189,51 @@ def create_app(dsn: str, send, *, today=today_ist, now=utc_now, pool_options: st
     def _identify(key: str) -> Actor | None:
         with pool.connection() as c:
             return actor_for_key(c, key)
+
+    # Declared before `identify` so it ends up *inside* it: Starlette makes the
+    # last middleware added the outermost one, and this needs the actor that
+    # `identify` resolves.
+    @app.middleware("http")
+    async def idempotent(request: Request, call_next):
+        key = request.headers.get("idempotency-key")
+        who = getattr(request.state, "actor", None)
+        if not key or who is None or request.method not in ("POST", "PATCH", "PUT", "DELETE"):
+            return await call_next(request)
+
+        inst, body = who.institution_id, await request.body()
+
+        def _reserve():
+            with pool.connection() as c:
+                idempotency.reserve(c, inst, key, request.method, request.url.path, body)
+
+        try:
+            await run_in_threadpool(_reserve)
+        except idempotency.Replay as again:
+            # The reply the first request got, verbatim, with a header saying so
+            # -- a client comparing the two should see no difference but this.
+            return JSONResponse(status_code=again.status_code, content=again.body,
+                                headers={"Idempotency-Replayed": "true"})
+        except Conflict as busy:
+            return JSONResponse(status_code=409, content={"detail": str(busy)})
+        except PreconditionFailed as wrong:
+            return JSONResponse(status_code=412, content={"detail": str(wrong)})
+
+        response = await call_next(request)
+        payload = b"".join([chunk async for chunk in response.body_iterator])
+
+        def _record():
+            with pool.connection() as c:
+                if 200 <= response.status_code < 300:
+                    idempotency.finish(c, inst, key, response.status_code,
+                                       json.loads(payload) if payload else None)
+                else:
+                    # A failed request is not a result worth replaying: the client
+                    # should be free to fix it and retry under the same key.
+                    idempotency.release(c, inst, key)
+
+        await run_in_threadpool(_record)
+        return Response(content=payload, status_code=response.status_code,
+                        headers=dict(response.headers), media_type=response.media_type)
 
     @app.middleware("http")
     async def identify(request: Request, call_next):

@@ -285,6 +285,31 @@ CREATE INDEX IF NOT EXISTS outbox_charge ON outbox (charge_id, id) WHERE charge_
 
 -- Row-level security: a transaction sees only the institution named in
 -- app.institution_id, and sees nothing at all when none is set.
+
+-- A client's own retry key. The seven idempotency keys elsewhere are the
+-- domain's: they make a repeated *operation* a no-op. This one is the
+-- transport's: it makes a repeated *request* return the first reply, which is
+-- what a client that timed out and retried actually needs -- it cannot tell a
+-- lost request from a lost response.
+--
+-- reserved_at without finished_at means a request is in flight. A reservation
+-- older than the takeover window is treated as abandoned, the same way the
+-- outbox treats a claim nobody finished, so a crash mid-request cannot wedge a
+-- key forever.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    institution_id  bigint      NOT NULL REFERENCES institutions(id),
+    key             text        NOT NULL,
+    fingerprint     text        NOT NULL,
+    method          text        NOT NULL,
+    path            text        NOT NULL,
+    status_code     int,
+    response        jsonb,
+    reserved_at     timestamptz NOT NULL DEFAULT now(),
+    finished_at     timestamptz,
+    PRIMARY KEY (institution_id, key)
+);
+CREATE INDEX IF NOT EXISTS idempotency_keys_age ON idempotency_keys (reserved_at);
+
 --
 -- institutions has no policy on purpose: the API looks an institution up by
 -- its key before it knows which institution it is serving.
@@ -294,7 +319,7 @@ BEGIN
     FOREACH t IN ARRAY ARRAY['members', 'audit_log', 'member_fees', 'member_upi_ids', 'charges',
                              'bank_credits', 'payments', 'allocations', 'outbox',
                              'credit_reversals', 'statement_imports', 'alerts', 'daily_closes',
-                             'approval_requests', 'review_outcomes'] LOOP
+                             'approval_requests', 'review_outcomes', 'idempotency_keys'] LOOP
         -- ALTER TABLE takes an exclusive lock, so skip it when already applied:
         -- a restart must not block live traffic.
         IF NOT (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class

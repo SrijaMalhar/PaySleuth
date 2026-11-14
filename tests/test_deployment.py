@@ -61,7 +61,7 @@ def test_every_protected_table_forces_row_level_security(conn):
     protected = conn.execute(
         "SELECT COUNT(*) AS n FROM pg_class WHERE relnamespace = current_schema()::regnamespace "
         "AND relrowsecurity").fetchone()
-    assert protected["n"] == 15
+    assert protected["n"] == 16
 
 
 def test_the_connecting_role_does_not_bypass_row_level_security(conn):

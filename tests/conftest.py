@@ -200,4 +200,7 @@ def api():
             inst, key = create_institution(conn, "Bright Minds Tuition")
             other, other_key = create_institution(conn, "Other Centre")
             client.headers["X-API-Key"] = key
-            yield SimpleNamespace(client=client, sent=sent, inst=inst, other_key=other_key)
+            # pool as well as client: a test that wants to look at the rows the API
+            # wrote has to use the API's own schema, not the shared one.
+            yield SimpleNamespace(client=client, sent=sent, inst=inst, other_key=other_key,
+                                  pool=pool, conn=conn)

@@ -82,7 +82,7 @@ rules that spend money without a human are a closed ordered list rather than a p
 
 ## Domain model
 
-Seventeen tables. The ones money moves through, and the direction each relationship points:
+Eighteen tables. The ones money moves through, and the direction each relationship points:
 
 ```mermaid
 erDiagram
@@ -255,7 +255,7 @@ that decides what a bug can do.
 | A payment is voided at most once | Partial unique index on `payments.reverses_id` | Two corrections must not both take the same money back |
 | Money rows are never changed or deleted | `BEFORE UPDATE OR DELETE` triggers on `payments` and `allocations` | A future careless `UPDATE` anywhere, including a psql session, has to fail |
 | Nobody approves their own correction | `CHECK (decided_by <> requested_by)` | The control has to survive a bug in the code above it |
-| A tenant sees only its own rows | `FORCE`d row-level security on 15 tables, keyed on `app.institution_id` | A forgotten `WHERE` clause becomes a no-op rather than a leak |
+| A tenant sees only its own rows | `FORCE`d row-level security on 16 tables, keyed on `app.institution_id` | A forgotten `WHERE` clause becomes a no-op rather than a leak |
 | `amount = gross - concession` | `CHECK` on `charges` | Arithmetic stated once, next to the data |
 | No charge is over-allocated | Code (`settle_members` allocates `min(unspent, unpaid)`) + checked after every step by the property test | Needs the current sums, which a row constraint cannot see |
 | Nobody holds unused money while owing | Code, same place | Same |

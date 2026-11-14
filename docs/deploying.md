@@ -72,7 +72,7 @@ ordinary role to use instead — with SQL, because a role added through the prov
 that same administrative role and fails the check for the same reason. The application then creates its
 own tables and owns them, which is safe only because the schema declares `FORCE ROW LEVEL SECURITY`: a
 table's owner bypasses a merely-enabled policy whatever its role attributes say. `tests/test_deployment.py`
-asserts all 15 protected tables carry `FORCE`, since every tenancy test in the suite depends on it.
+asserts all 16 protected tables carry `FORCE`, since every tenancy test in the suite depends on it.
 
 One change the hosted database forced on the code. The free services put a transaction-mode pooler in
 front of PostgreSQL, which hands the next transaction a different backend — so a statement psycopg
