@@ -7,7 +7,7 @@ rules the design rests on:
     1. No cycles. Every module can be understood, and tested, without its callers.
     2. The pure layer stays pure: parsing, money and time never touch the database,
        so they are testable without one and reusable away from it.
-    3. HTTP lives only in api.py. Every other module can be called from the worker,
+    3. HTTP lives only in the api package. Every other module can be called from the worker,
        the CLI or a test with no request in sight.
 """
 
@@ -31,7 +31,9 @@ HTTP_NAMES = {"fastapi", "starlette", "pydantic", "uvicorn"}
 
 def _module_name(path: Path) -> str:
     if path.name == "__init__.py":
-        return "banks" if path.parent.name == "banks" else "paysleuth"
+        # A subpackage is named for its own folder; only the root package's
+        # __init__ is "paysleuth".
+        return "paysleuth" if path.parent.name == "paysleuth" else path.parent.name
     return path.stem if path.parent.name == "paysleuth" else f"{path.parent.name}.{path.stem}"
 
 
@@ -39,7 +41,8 @@ def _imports(path: Path) -> tuple[set[str], set[str]]:
     """(modules of this package, outside packages) imported by a file."""
     inside, outside = set(), set()
     tree = ast.parse(path.read_text())
-    prefix = "banks." if path.parent.name == "banks" else ""
+    # Inside a subpackage, `from .x import y` means that subpackage's x.
+    prefix = "" if path.parent.name == "paysleuth" else f"{path.parent.name}."
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             outside.update(alias.name.split(".")[0] for alias in node.names)
@@ -73,9 +76,21 @@ def test_the_import_graph_has_no_cycles():
         layers.append(layer)
         placed |= set(layer)
         remaining = {m: deps for m, deps in remaining.items() if m not in placed}
-    # The shape matters as much as the absence of cycles: api.py at the top, with
-    # nothing above it but the ASGI entry point.
-    assert layers[-1] == ["main"] and layers[-2] == ["api"]
+    # The shape matters as much as the absence of cycles: nothing but the ASGI
+    # entry point sits above the HTTP package.
+    #
+    # The earlier form of this asserted api.py occupied the second layer from the
+    # top. That stopped being the right statement when api.py became a package:
+    # api.schemas imports only money and errors, so by dependency *depth* it
+    # belongs near the bottom, and depth is not architectural rank. What actually
+    # matters is that the package is a sink -- the domain can be called by the
+    # worker, the CLI and the tests because none of it depends on the web layer.
+    assert layers[-1] == ["main"]
+    http = {m for m in graph if m == "api" or m.startswith("api.")}
+    assert http, "the api package vanished"
+    reaching_up = {m: sorted(deps & http) for m, deps in graph.items()
+                   if m not in http and m != "main" and deps & http}
+    assert reaching_up == {}, f"the domain depends on the web layer: {reaching_up}"
 
     # allocation.py is in the bottom layer though it is not pure: it writes SQL, but
     # it takes the connection as a parameter and imports no module of this package,
@@ -110,28 +125,29 @@ def test_only_the_api_module_knows_about_http():
     offenders = {}
     for path in sorted(PACKAGE.rglob("*.py")):
         name = _module_name(path)
-        if name in ("api", "main"):
+        if name == "main" or name == "api" or name.startswith("api."):
             continue
         _, outside = _imports(path)
         if outside & HTTP_NAMES:
             offenders[name] = sorted(outside & HTTP_NAMES)
-    assert offenders == {}, f"HTTP leaked out of api.py into {offenders}"
+    assert offenders == {}, f"HTTP leaked out of the api package into {offenders}"
 
 
 def test_the_domain_raises_its_own_errors_rather_than_http_ones():
-    """A 404 is a presentation choice. Business code raises NotFound and api.py maps it,
+    """A 404 is a presentation choice. Business code raises NotFound and the api package maps it,
     so the same function can be called from the worker or a test."""
     offenders = []
     for path in sorted(PACKAGE.rglob("*.py")):
-        if _module_name(path) in ("api", "main"):
+        name = _module_name(path)
+        if name == "main" or name == "api" or name.startswith("api."):
             continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
                 name = node.exc.func
                 raised = getattr(name, "id", None) or getattr(name, "attr", None)
                 if raised == "HTTPException":
-                    offenders.append(f"{_module_name(path)}:{node.lineno}")
-    assert offenders == [], f"HTTPException raised outside api.py at {offenders}"
+                    offenders.append(f"{name}:{node.lineno}")
+    assert offenders == [], f"HTTPException raised outside the api package at {offenders}"
 
 
 def test_every_module_says_what_it_is_for():

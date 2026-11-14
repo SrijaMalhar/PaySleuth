@@ -281,7 +281,7 @@ allocation and the outgoing receipt. The order of the first four steps is the de
 
 ```mermaid
 sequenceDiagram
-    participant API as api.py
+    participant API as api/credits.py
     participant P as payments.record_credit
     participant DB as PostgreSQL
     participant M as matching.decide
@@ -432,7 +432,7 @@ graph TD
         main["main · ASGI entry"]
     end
     subgraph L9[" "]
-        api["api · the only module that knows HTTP exists (38 endpoints)"]
+        api["api/ · the only package that knows HTTP exists · 9 modules, 37 endpoints"]
     end
     subgraph L8[" "]
         importer
@@ -494,10 +494,18 @@ afternoon:
 2. **The pure layer is closed.** Money, time, name matching, statement parsing and the bank adapters
    depend only on each other — never on the database. So a statement can be parsed and balance-checked
    with no connection, no institution and no fixtures.
-3. **HTTP lives only in `api.py`.** Business code raises `NotFound`, `Conflict`, `PreconditionFailed`,
-   `Forbidden`; `api.py` maps them to 404, 409, 412, 403 in one place. A test asserts no module outside
-   `api.py` raises `HTTPException`. That is what lets the worker, the CLI and the tests call the same
+3. **HTTP lives only in `api/`.** Business code raises `NotFound`, `Conflict`, `PreconditionFailed`,
+   `Forbidden`; the package maps them to 404, 409, 412, 403 in one place. A test asserts no module
+   outside it raises `HTTPException`, and a second asserts nothing outside it is ever imported *by* the
+   domain — the package is a sink. That is what lets the worker, the CLI and the tests call the same
    functions with no request in sight.
+
+   The package is routers by resource (`members`, `credits`, `jobs`, `staff`, `reports`, `system`) over
+   shared `deps` and `schemas`; what stays in `__init__` is what is true of every request — who is
+   calling, how fast they may go, whether this is a retry, and how a domain error becomes a status code.
+   Routers are built at import time and cannot close over `create_app`'s arguments, so the clock, the
+   message sender and the pool live on `app.state` and `deps` reads them back. That indirection is the
+   only thing the split cost.
 
 Behaviour that varies is injected, not imported: `create_app(dsn, send, today=…, now=…)` takes the message
 sender and the clock, which is why the API tests run against a real HTTP server with a fixed date and a
@@ -544,7 +552,7 @@ principle you cannot point at is a principle you are not following.
 | **Open/closed** | `SIGNALS` is a tuple of `Signal` values; `BANKS` a tuple of adapters. A new reason or a new bank is one entry — no existing function changes | Every new bank adds a branch to the parser, and the parser becomes the file nobody will touch |
 | **Liskov substitution** | Every bank adapter satisfies the same three names (`NAME`, `HEADER`, `narration`), and the generic fallback is one of them | `detect()` would need to know which adapters are "real", and the fallback would be a special case forever |
 | **Interface segregation** | A signal receives `Facts`, not a connection. There is no `conn` in scope for it to reach for | A signal could issue a query, and the scoring pass would go from 4 queries to 4 + N |
-| **Dependency inversion** | `create_app(dsn, send, today=…, now=…)` injects the gateway and the clock. Business code raises `NotFound`/`Conflict`; only `api.py` knows those are 404 and 409 | Tests monkeypatch modules, and the worker and CLI cannot call the same functions |
+| **Dependency inversion** | `create_app(dsn, send, today=…, now=…)` injects the gateway and the clock onto `app.state`, and `api/deps.py` reads them back. Business code raises `NotFound`/`Conflict`; only the api package knows those are 404 and 409 | Tests monkeypatch modules, and the worker and CLI cannot call the same functions |
 | **Fail closed** | RLS with nothing set matches no rows; `check_role()` refuses to start as a role that bypasses it | A forgotten `WHERE` becomes a leak instead of a no-op |
 | **Make illegal states unrepresentable** | `CHECK ((status = 'pending') = (decided_by IS NULL))`; `CHECK (decided_by <> requested_by)`; append-only triggers | A half-decided approval, or a self-approved correction, is reachable from any code path |
 | **Primitive obsession, avoided** | Paise as `int` with `Decimal` only at the edge; periods as zero-padded `str`; `Credit`, `Decision`, `Facts` as frozen types | `int(0.29 * 100)` is 28, and `"2026-9" < "2026-10"` is false |

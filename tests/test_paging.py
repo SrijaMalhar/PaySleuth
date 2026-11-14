@@ -38,10 +38,22 @@ def get_route(app, path):
                 if getattr(r, "path", None) == path and "GET" in getattr(r, "methods", ()))
 
 
+def query_params(dependant):
+    """Every query parameter, including those a sub-dependency declares.
+
+    The page bound moved into one `page` dependency rather than sitting on ten
+    signatures, so asking a route for its own parameters no longer finds it.
+    """
+    names = {p.name for p in dependant.query_params}
+    for sub in dependant.dependencies:
+        names |= query_params(sub)
+    return names
+
+
 @pytest.mark.parametrize("path", LIST_ENDPOINTS)
 def test_every_list_endpoint_takes_a_page(api, path):
     """The property, asserted per endpoint rather than trusted."""
-    params = {p.name for p in get_route(api.client.app, path).dependant.query_params}
+    params = query_params(get_route(api.client.app, path).dependant)
     assert "limit" in params, f"{path} returns everything"
 
 
