@@ -42,8 +42,8 @@ the arithmetic. Catching that needs a third question, asked of the database rath
 
 | | |
 |---|---|
-| **358 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
-| **22/22 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
+| **447 tests, zero mocks** | every one against a real PostgreSQL in its own schema, because locks, constraints and row-level security *are* the subject |
+| **32/32 mutations caught** | each safety mechanism deleted one at a time; the test that covers it must go red |
 | **9 concurrency races** | real threads released on a barrier — and where an interleaving matters it is *forced* by polling `pg_stat_activity`, not hoped for |
 | **1 fingerprint, 4 worker counts** | parallel import produces books that hash identically to a serial import; equivalence tested at 1, 4, 8 and 16 workers |
 | **12 bugs, listed by name** | including the one where a feature's headline claim in this README was false |
@@ -613,7 +613,10 @@ Six layers, each catching what the one above cannot:
 4. **Equivalence testing** — parallel import against a serial baseline at four worker counts, compared by
    business key, with the whole set of books hashed to one fingerprint.
 5. **Mutation testing** — `tools/mutation_check.py` removes one safety mechanism at a time and requires its
-   test to go red. 22/22. This is the layer that answers "do your tests actually test that?"
+   test to go red. 32/32. This is the layer that answers "do your tests actually test that?" It has twice
+   now failed a mechanism that was correct and a test that was not: the rate limiter's lock survived
+   deletion because the interpreter rarely interleaves a short critical section, and the test passed about
+   one run in three without it. A test that flaky is worse than none.
 6. **Architecture tests** — the import graph assertions above, so the layering is a fact rather than a
    claim.
 
@@ -704,8 +707,8 @@ python -m tools.walkthrough        # the five beats in the GIF above
 python -m tools.seed_demo          # a centre mid-month, for clicking through /docs
 python -m tools.seed_history       # four months, 40 members, four banks' layouts
 uvicorn paysleuth.main:app &       # API docs at http://localhost:8000/docs
-pytest -q                          # 358 tests
-python tools/mutation_check.py     # 22 safety mechanisms, each deleted and caught
+pytest -q                          # 447 tests
+python tools/mutation_check.py     # 32 safety mechanisms, each deleted and caught
 ```
 
 The five automatic rules, in order. Only these decide without a human:
@@ -743,6 +746,23 @@ identity and two students called Diya Sharma are two students.
 forces on the code: its owner role carries `BYPASSRLS`, and its pooler breaks server-side prepared
 statements.
 
+### Security decisions worth stating
+
+**API keys are hashed with SHA-256, not Argon2 or bcrypt**, and that is deliberate. A slow KDF makes
+offline brute force expensive against secrets *people choose*, because those come from a space small
+enough to search. A key here is 32 bytes of CSPRNG output; searching 2²⁵⁶ is not expensive, it is
+impossible, so a work factor would buy nothing and cost a key-stretching run on every request. What the
+argument rests on is the entropy rather than the hash — so `tests/test_api_keys.py` asserts the entropy,
+and a mutation that shortens a key to four bytes turns it red. The comment is the reasoning; the test is
+what holds it.
+
+The lookup is by digest, so a row is found through an index on a hash and the key itself is never
+compared byte by byte in Python — there is no comparison for a caller to time.
+
+**`hmac.compare_digest` on webhook signatures is the one mechanism not mutation-tested.** Swapping it for
+`==` answers identically for every input and leaks only timing, so no behaviour test can catch it. It is
+a review rule rather than a tested one, and the code says so.
+
 ## Limits
 
 Stated plainly, because an unstated limit is a claim.
@@ -760,7 +780,5 @@ Stated plainly, because an unstated limit is a claim.
   relies on reference codes or review. A truncated ID is never stored as if it were the payer's.
 - **A change to a statement file's very first line** is visible only against the previous statement, not
   within the file. There is a test that says so.
-- **No rate limiting.** An API key can call any endpoint as fast as it likes. For a money API that is a
-  real gap, not a style choice.
 - **A single upload must fit in memory** for the grouping pass (10 MB cap at the API).
 - **No web UI.** The API and `/docs` are the interface.

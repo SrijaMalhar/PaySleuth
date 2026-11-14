@@ -27,6 +27,9 @@ class Mutation:
 
 
 MUTATIONS = [
+    Mutation("api keys shortened to something guessable", "paysleuth/institutions.py",
+             (("KEY_BYTES = 32", "KEY_BYTES = 4"),),
+             "tests/test_api_keys.py::test_a_key_carries_enough_entropy_that_a_fast_hash_is_the_right_one"),
     Mutation("structured log fields are not masked", "paysleuth/logging_setup.py",
              (("        for key, value in extras(record).items():", "        for key, value in {}.items():"),),
              "tests/test_monitoring.py::test_structured_fields_are_masked_too"),

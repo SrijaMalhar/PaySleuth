@@ -1,7 +1,59 @@
 name: CI
 on: [push, pull_request]
+
 jobs:
+  # Lint and tests across the versions, because that is where a version
+  # difference shows up: SQL the planner treats differently, a psycopg wheel
+  # that does not exist yet, a syntax that moved.
+  #
+  # Explicit combinations rather than a full product. Six jobs to learn what
+  # three can tell you is six times the queue for the same information: the
+  # pair the project is built on, the newest of both, and the oldest
+  # PostgreSQL still supported. A failure on any one of them says which axis.
   test:
+    name: py${{ matrix.python }} · pg${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # one red combination must not hide the others
+      matrix:
+        include:
+          - python: "3.12"
+            postgres: "16"
+            primary: true     # what the Dockerfile pins and what development uses
+          - python: "3.13"
+            postgres: "17"
+          - python: "3.12"
+            postgres: "15"
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
+    env:
+      PAYSLEUTH_TEST_DATABASE_URL: postgresql://paysleuth:paysleuth@localhost:5432/paysleuth_test
+      PAYSLEUTH_TEST_SUPERUSER_URL: postgresql://postgres:postgres@localhost:5432/paysleuth_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Create the app role and databases
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -f docker/initdb.sql
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: python -m pyflakes paysleuth tests tools bench
+      - name: Tests
+        run: python -m pytest -q
+
+  # Everything that does not vary by version, run once. The mutation check
+  # restores each file it edits, so it must not race another job on the same
+  # checkout, and a Docker build tells you nothing new on a second Python.
+  integration:
+    name: mutations, seed and image
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -23,14 +75,14 @@ jobs:
       - name: Create the app role and databases
         run: PGPASSWORD=postgres psql -h localhost -U postgres -f docker/initdb.sql
       - run: pip install -r requirements-dev.txt
-      - name: Lint
-        run: python -m pyflakes paysleuth tests tools bench
-      - name: Tests
-        run: python -m pytest -q
       - name: Mutation check
         run: python tools/mutation_check.py
       - name: Demo seed
         run: python -m tools.seed_demo
+        env:
+          PAYSLEUTH_DATABASE_URL: postgresql://paysleuth:paysleuth@localhost:5432/paysleuth
+      - name: Several months of history
+        run: python -m tools.seed_history --months 2 --members 12
         env:
           PAYSLEUTH_DATABASE_URL: postgresql://paysleuth:paysleuth@localhost:5432/paysleuth
       - name: Docker image builds and serves
@@ -41,4 +93,8 @@ jobs:
           for i in $(seq 30); do curl -fsS localhost:8000/health && break; sleep 1; done
           curl -fsS localhost:8000/health
           curl -fsS localhost:8000/metrics | grep -q paysleuth_members_active
+          # The image logs JSON now, so check it parses rather than eyeballing it.
+          docker logs api 2>&1 | tail -5 | while read -r line; do
+            printf '%s' "$line" | python3 -c 'import json,sys; json.loads(sys.stdin.read())'
+          done
           docker logs api

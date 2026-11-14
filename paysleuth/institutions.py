@@ -12,7 +12,29 @@ from .paging import limits
 ROLES = ("owner", "clerk")
 
 
+# 32 random bytes: 256 bits, from the OS CSPRNG. The number matters, because
+# the hashing decision below rests on it and a test asserts it.
+KEY_BYTES = 32
+KEY_PREFIX = "ps_"
+
+
 def _hash(key: str) -> str:
+    """SHA-256, deliberately, and not Argon2 or bcrypt.
+
+    A slow KDF exists to make offline brute force expensive against secrets
+    that people choose, because those come from a space small enough to search.
+    An API key here is KEY_BYTES of CSPRNG output. Searching 2^256 is not
+    expensive, it is impossible, so a work factor would buy nothing and cost a
+    key-stretching run on every single request.
+
+    What the argument depends on is the entropy, not the hash -- so if key
+    generation ever becomes something a person can type or remember, this
+    becomes wrong immediately. test_api_keys.py asserts the entropy for that
+    reason: the comment is the reasoning, the test is what holds it.
+
+    A leaked database still leaks no working key, which is the property this is
+    actually for.
+    """
     return hashlib.sha256(key.encode()).hexdigest()
 
 
@@ -25,7 +47,7 @@ def _clean(name: str | None, what: str) -> str:
 
 def _add_staff(conn, institution_id: int, name: str, role: str) -> tuple[int, str]:
     # Only the key's SHA-256 digest is stored, so a leaked database leaks no working keys.
-    key = "ps_" + secrets.token_urlsafe(32)
+    key = KEY_PREFIX + secrets.token_urlsafe(KEY_BYTES)
     staff_id = conn.execute(
         "INSERT INTO staff (institution_id, name, role, api_key_hash) VALUES (%s, %s, %s, %s) RETURNING id",
         (institution_id, name, role, _hash(key))).fetchone()["id"]
