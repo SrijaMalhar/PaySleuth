@@ -719,9 +719,25 @@ The five automatic rules, in order. Only these decide without a human:
 
 Outgoing messages are signed `X-PaySleuth-Signature: t=<unix>,v1=<hex HMAC-SHA256>` over
 `"<t>.<body bytes>"` — signing the timestamp *with* the body is what stops a captured message being
-replayed with a fresh `t`. `/metrics` needs either the scrape token or a staff key. Logs mask phone
-numbers and UPI IDs (`98****3210`, `su****@oksbi`) in a filter on the handler — including exception
-tracebacks — so a line added later anywhere is masked without the author remembering.
+replayed with a fresh `t`. `/metrics` needs either the scrape token or a staff key.
+
+Logs are one JSON object per line, because the place they end up has a query box rather than a reader
+(`PAYSLEUTH_LOG_FORMAT=text` for when that reader is your own terminal). Phone numbers and UPI IDs are
+masked (`98****3210`, `su****@oksbi`) in a filter on the *handler*, so a line added later anywhere is
+masked without the author remembering — including exception tracebacks, and including the structured
+fields a caller attaches with `extra=`. That last one was not a gap until the JSON formatter existed:
+the text format never printed those, so nothing masked them. Changing how logs are written changed what
+counts as a leak, which is the sort of thing a format migration quietly does.
+
+Every caller gets a token bucket: 120 requests a minute, burst 30, refused with `429` and a `Retry-After`
+a client can trust. It is in process rather than in PostgreSQL — a database-backed limiter would be exact
+across instances and would add a write to every request, including the ones it exists to make cheap. With
+N instances the effective limit is N times the configured one. `/health` is exempt, because it is what
+the uptime check and the scheduled jobs poll.
+
+A client may send `Idempotency-Key` on any mutating request and get the first reply back instead of
+acting twice — the one thing the seven domain keys cannot do, since `POST /members` has no natural
+identity and two students called Diya Sharma are two students.
 
 → **[docs/deploying.md](docs/deploying.md)** for the deploy, including the two things a managed PostgreSQL
 forces on the code: its owner role carries `BYPASSRLS`, and its pooler breaks server-side prepared

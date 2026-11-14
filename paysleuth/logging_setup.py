@@ -13,8 +13,10 @@ Enough is left to tell two parents apart in a support conversation, and not
 enough to contact either.
 """
 
+import json
 import logging
 import re
+from datetime import UTC, datetime
 
 # A 10-digit Indian mobile number, with an optional +91 or 0 in front, a space or
 # hyphen allowed where people group the digits, and not part of a longer number.
@@ -39,6 +41,30 @@ def _mask_upi_ids(text: str) -> str:
 def mask(text: str) -> str:
     """Mask phone numbers and UPI IDs in one string."""
     return _mask_upi_ids(_mask_phones(text))
+
+
+# Everything logging puts on a record itself. Anything else was passed as
+# `extra=` by a caller, which is exactly the kind of field that holds a phone
+# number -- and which nothing printed until the JSON formatter arrived.
+_STANDARD = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {
+    "message", "asctime", "taskName"}
+
+
+def _mask_value(value, depth: int = 0):
+    """Mask strings anywhere in a small structure, and leave the rest alone."""
+    if isinstance(value, str):
+        return mask(value)
+    if depth < 3:
+        if isinstance(value, dict):
+            return {k: _mask_value(v, depth + 1) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_mask_value(v, depth + 1) for v in value]
+    return value
+
+
+def extras(record: logging.LogRecord) -> dict:
+    """The fields a caller attached with extra=."""
+    return {k: v for k, v in record.__dict__.items() if k not in _STANDARD}
 
 
 class MaskPersonalData(logging.Filter):
@@ -67,17 +93,56 @@ class MaskPersonalData(logging.Filter):
             record.exc_info = None
         if record.stack_info:
             record.stack_info = mask(record.stack_info)
+        # Structured fields too. The text formatter never printed these, so this
+        # was not a gap until the JSON one started emitting them -- changing how
+        # logs are written changed what a leak is.
+        for key, value in extras(record).items():
+            masked_value = _mask_value(value)
+            if masked_value != value:
+                setattr(record, key, masked_value)
         return True
 
 
-def configure(level: str | int = logging.INFO, stream=None) -> None:
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line, for a log that is queried rather than read.
+
+    Keys are fixed and short so a collector can index them, and whatever the
+    caller attached with extra= rides alongside -- already masked, because the
+    filter runs before any formatter.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "at": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_text:
+            entry["exception"] = record.exc_text
+        if record.stack_info:
+            entry["stack"] = record.stack_info
+        entry.update(extras(record))
+        # default=str so an unexpected object logs as its repr instead of
+        # raising inside logging, which would lose the line entirely.
+        return json.dumps(entry, default=str, ensure_ascii=False)
+
+
+TEXT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def configure(level: str | int = logging.INFO, stream=None, fmt: str = "json") -> None:
     """Set up logging for a process, with masking on the handler.
 
     On the handler rather than on one logger, so records from libraries and
     from any logger name are masked too.
+
+    JSON by default, because the place these lines end up is a collector with a
+    query box. `fmt="text"` gives the readable one line per record, which is
+    what you want when the collector is your own terminal.
     """
     handler = logging.StreamHandler(stream)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler.setFormatter(JsonFormatter() if fmt == "json" else logging.Formatter(TEXT))
     handler.addFilter(MaskPersonalData())
     root = logging.getLogger()
     for existing in list(root.handlers):

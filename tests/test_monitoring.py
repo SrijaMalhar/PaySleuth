@@ -1,6 +1,7 @@
 """Metrics and masked logs."""
 
 import io
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 
@@ -147,8 +148,60 @@ def test_the_filter_masks_whatever_a_log_line_interpolates():
     assert "su****@oksbi" in lines[0] and "98****3210" in lines[0]
     assert "sunita.sharma@oksbi" not in stream.getvalue() and "9876543210" not in stream.getvalue()
     assert "98****3210" in lines[1] and "rk****@okhdfcbank" in lines[1]
-    assert lines[2].endswith("no personal data here")
+    assert json.loads(lines[2])["message"] == "no personal data here"
     assert "98****3210" in lines[3]
+
+
+def test_the_json_format_is_one_object_a_line_with_fixed_keys():
+    """What a collector indexes on."""
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    logging.getLogger("paysleuth.test").warning("statement %s could not be read", "june.csv")
+
+    entry = json.loads(stream.getvalue())
+    assert entry["level"] == "WARNING"
+    assert entry["logger"] == "paysleuth.test"
+    assert entry["message"] == "statement june.csv could not be read"
+    assert entry["at"].endswith("+00:00"), "timestamps are UTC, so two hosts sort together"
+
+
+def test_structured_fields_are_masked_too():
+    """The leak the JSON formatter would have opened.
+
+    extra= never reached the output under the text format, so nothing masked
+    it. Changing how logs are written changed what counts as a leak.
+    """
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    logging.getLogger("paysleuth.test").info(
+        "reminder sent", extra={"phone": "9876543210", "member": {"upi": "sunita.sharma@oksbi"},
+                                "stages": ["due 9876543210"], "attempt": 2})
+
+    raw = stream.getvalue()
+    assert "9876543210" not in raw and "sunita.sharma@oksbi" not in raw
+    entry = json.loads(raw)
+    assert entry["phone"] == "98****3210"
+    assert entry["member"]["upi"] == "su****@oksbi"
+    assert entry["stages"] == ["due 98****3210"]
+    assert entry["attempt"] == 2, "a number was mangled on the way through"
+
+
+def test_an_unserialisable_field_does_not_lose_the_line():
+    """A log line is evidence; losing it to a TypeError inside logging is worse
+    than printing a repr."""
+    stream = io.StringIO()
+    configure(logging.INFO, stream)
+    logging.getLogger("paysleuth.test").info("odd", extra={"thing": object()})
+    assert "odd" in json.loads(stream.getvalue())["message"]
+
+
+def test_the_text_format_is_still_available_for_a_terminal():
+    stream = io.StringIO()
+    configure(logging.INFO, stream, fmt="text")
+    logging.getLogger("paysleuth.test").info("receipt to %s", "9876543210")
+    line = stream.getvalue().strip()
+    assert line.endswith("receipt to 98****3210")
+    assert not line.startswith("{")
 
 
 def test_a_broken_format_string_does_not_lose_the_record():

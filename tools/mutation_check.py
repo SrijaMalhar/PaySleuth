@@ -27,6 +27,9 @@ class Mutation:
 
 
 MUTATIONS = [
+    Mutation("structured log fields are not masked", "paysleuth/logging_setup.py",
+             (("        for key, value in extras(record).items():", "        for key, value in {}.items():"),),
+             "tests/test_monitoring.py::test_structured_fields_are_masked_too"),
     Mutation("idempotency key reusable with a different request", "paysleuth/idempotency.py",
              (('if existing["fingerprint"] != mine:', 'if False:'),),
              "tests/test_idempotency.py::test_the_same_key_with_a_different_body_is_refused"),
